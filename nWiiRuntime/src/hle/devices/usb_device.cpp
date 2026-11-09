@@ -76,11 +76,11 @@ public:
             
             if (!m_events.empty())
                 return deliver_event(ctx, out_ptr, out_len);
-            if (req.req_addr != 0 && out_ptr != 0) {
+            if (out_ptr != 0) {
                 m_pending_intr.push_back({req.req_addr, out_ptr, out_len});
                 return IPC_NO_REPLY;
             }
-            return IPC_OK;
+            return IPC_NO_REPLY;
         }
 
         case USBV0_BLKMSG: {

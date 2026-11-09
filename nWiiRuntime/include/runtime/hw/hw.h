@@ -29,6 +29,8 @@ void dsp_trigger_interrupt();
 
 int dsp_pending_os_interrupt();
 void di_tick();  
+void cp_process_fifo();
+void cp_signal_draw_done();
 
 size_t dsp_audio_pull(int16_t* out, size_t frames);
 void pe_signal_token(uint32_t token, bool raise_interrupt); 
@@ -40,6 +42,7 @@ void pi_fifo_get(uint32_t &base, uint32_t &end, uint32_t &wptr);
 void pi_fifo_set_wptr(uint32_t wptr);
 
 uint32_t cp_fifo_base_reg();
+void register_cp(MMIODispatcher &dispatcher);
 void register_pe(MMIODispatcher &dispatcher);
 void register_vi(MMIODispatcher &dispatcher);
 void register_dsp(MMIODispatcher &dispatcher);

@@ -355,13 +355,20 @@ static void di_read_internal(nwii::runtime::MMU *mmu, uint32_t inbuf, uint32_t o
   bool have_media = (file && file->is_open()) || VirtualDisc::get().valid();
 
   if (have_media && buf_ptr != 0 && total_length > 0) {
-    std::vector<uint8_t> temp(total_length);
-    read_disc_data(temp.data(), (uint32_t)offset, total_length);
-    bytes_read = total_length;
-    for (uint32_t i = 0; i < bytes_read; i++)
-      mmu->write8(buf_ptr + i, temp[i]);
+    uint8_t* dst = mmu->get_ptr(buf_ptr);
+    if (dst) {
+      read_disc_data(dst, (uint32_t)offset, total_length);
+      bytes_read = total_length;
+      success = true;
+    } else {
+      std::vector<uint8_t> temp(total_length);
+      read_disc_data(temp.data(), (uint32_t)offset, total_length);
+      bytes_read = total_length;
+      for (uint32_t i = 0; i < bytes_read; i++)
+        mmu->write8(buf_ptr + i, temp[i]);
+      success = true;
+    }
     std::cout << "[DI] Read " << bytes_read << " bytes" << std::endl;
-    success = true;
   } else if (buf_ptr != 0) {
     if (offset == 0) {
       const std::string& gid = Config::get().game_id;
@@ -882,7 +889,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
       static uint32_t restore_count = 0;
       restore_count++;
       if (ctx.pc == 0 || (restore_count % 64) == 1) {
-          std::cout << "[HLE PI] Context restore #" << std::dec << restore_count
+          if (std::getenv("NWII_DEBUG")) std::cout << "[HLE PI] Context restore #" << std::dec << restore_count
                     << " pc=0x" << std::hex << ctx.pc << " r1=0x" << ctx.gpr[1]
                     << " msr=0x" << ctx.msr << std::dec << "\n";
       }
@@ -983,7 +990,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   if (g_ipc_interrupt_delay > 0) {
       g_ipc_interrupt_delay--;
       if (g_ipc_interrupt_delay == 0) {
-          nwii::runtime::hw::trigger_pi_interrupt(0x00004000);
+          nwii::runtime::hw::trigger_pi_interrupt(0x00000010);
           if (std::getenv("NWII_SAMPLE"))
               std::cout << "[IPC] irq raised intmr=0x" << std::hex
                         << nwii::runtime::hw::pi_intmr << " msr=0x" << ctx.msr
@@ -993,16 +1000,12 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
   
   nwii::runtime::hw::di_tick();
+  nwii::runtime::hw::cp_process_fifo();
 
   if (ctx.vblank_pending) {
-      if (!ctx.in_callback && (ctx.msr & 0x8000)) {
-          ctx.vblank_pending = false;
-          nwii::runtime::hw::vi_trigger_interrupt();
-
-          
-          
-          hle_drive_thread_queue(ctx);
-      }
+      ctx.vblank_pending = false;
+      nwii::runtime::hw::vi_trigger_interrupt();
+      hle_drive_thread_queue(ctx);
   }
 
   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {
@@ -1011,7 +1014,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if (ctx.in_callback) {
-    if (std::getenv("NWII_SAMPLE") && (nwii::runtime::hw::pi_intsr & 0x4000)) {
+    if (std::getenv("NWII_SAMPLE") && (nwii::runtime::hw::pi_intsr & 0x00000010)) {
         static uint64_t n = 0;
         if ((n++ % 100000) == 0)
             std::cout << "[IPC] irq pending but in_callback pc=0x" << std::hex
@@ -1046,7 +1049,10 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
                   
                   
-                  if ((nwii::runtime::hw::pi_intmr & 0x100) && !c.in_callback &&
+                  uint32_t vi_h = c.mmu.read32(0x800030A0);
+                  bool vi_unmasked = (nwii::runtime::hw::pi_intmr & 0x100) &&
+                                     (vi_h != 0 && vi_h != 0xFFFFFFFF);
+                  if (vi_unmasked && !c.in_callback &&
                       !(nwii::runtime::hw::pi_intsr & 0x100) &&
                       (c.dispatch_saved_ctx == 0 || c.mmu.read32(0x800000E4) == 0)) {
                       nwii::runtime::hw::vi_trigger_interrupt();
@@ -1108,7 +1114,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                                     << handler << std::dec << "\n";
                   }
               }
-              return false;
+              // return false;
           }
       }
 
@@ -1160,7 +1166,20 @@ bool process_pending_callbacks(CPUContext &ctx) {
       }
   }
 
-  uint32_t active_ints = nwii::runtime::hw::pi_intsr & nwii::runtime::hw::pi_intmr;
+  uint32_t effective_intmr = nwii::runtime::hw::pi_intmr;
+  uint32_t vi_h = ctx.mmu.read32(0x800030A0);
+  if (vi_h != 0 && vi_h != 0xFFFFFFFF) {
+      effective_intmr |= 0x100;
+  }
+  uint32_t cp_h = ctx.mmu.read32(0x80003040 + 17 * 4);
+  if (cp_h != 0 && cp_h != 0xFFFFFFFF) {
+      effective_intmr |= 0x4000;
+  }
+  uint32_t ipc_h = ctx.mmu.read32(0x80003040 + 27 * 4);
+  if (ipc_h != 0 && ipc_h != 0xFFFFFFFF) {
+      effective_intmr |= 0x10;
+  }
+  uint32_t active_ints = nwii::runtime::hw::pi_intsr & effective_intmr;
 
   
   if (active_ints != 0 && (ctx.msr & 0x8000)) {
@@ -1283,11 +1302,11 @@ bool process_pending_callbacks(CPUContext &ctx) {
               int os_intr = -1;
               uint32_t bit_to_clear = 0;
               
-              if      (active_ints & 0x00004000) { os_intr = 27; bit_to_clear = 0x00004000; } 
+              if      (active_ints & 0x00004000) { os_intr = 17; bit_to_clear = 0x00004000; } 
               else if (active_ints & 0x00000100) { os_intr = 24; bit_to_clear = 0x00000100; } 
               else if (active_ints & 0x00000004) { os_intr = 21; bit_to_clear = 0x00000004; } 
               else if (active_ints & 0x00000008) { os_intr = 20; bit_to_clear = 0x00000008; } 
-              else if (active_ints & 0x00000010) { os_intr =  9; bit_to_clear = 0x00000010; } 
+              else if (active_ints & 0x00000010) { os_intr = 27; bit_to_clear = 0x00000010; } 
 
               else if (active_ints & 0x00000040) { os_intr = nwii::runtime::hw::dsp_pending_os_interrupt(); bit_to_clear = 0x00000040; } 
               else if (active_ints & 0x00000020) { os_intr =  8; bit_to_clear = 0x00000020; } 
@@ -1299,17 +1318,21 @@ bool process_pending_callbacks(CPUContext &ctx) {
                   uint32_t handler = ctx.mmu.read32(0x80003040 + os_intr * 4);
 
                   if (handler != 0 && handler != 0xFFFFFFFF) {
-                      if (std::getenv("NWII_SAMPLE") && os_intr == 24) {
-                          static int vn = 0;
-                          if (vn++ < 5)
+                      if (std::getenv("NWII_SAMPLE") && (os_intr == 24 || os_intr == 17)) {
+                          static int vn = 0, cpn = 0;
+                          if (os_intr == 24 && vn++ < 5)
                               std::cout << "[VIdisp] #" << vn << " handler=0x"
+                                        << std::hex << handler << " pc=0x"
+                                        << ctx.pc << std::dec << "\n";
+                          if (os_intr == 17 && cpn++ < 10)
+                              std::cout << "[CPdisp] #" << cpn << " handler=0x"
                                         << std::hex << handler << " pc=0x"
                                         << ctx.pc << std::dec << "\n";
                       }
                       
                       static uint32_t vi_dispatch_count = 0;
                       if (os_intr != 24 && (vi_dispatch_count++ % 256) == 0) {
-                          std::cout << "[HLE PI] Dispatching interrupt "
+                          if (std::getenv("NWII_DEBUG")) std::cout << "[HLE PI] Dispatching interrupt "
                                     << std::dec << os_intr << " to handler 0x"
                                     << std::hex << handler << " r1=0x"
                                     << ctx.gpr[1] << " pc=0x" << ctx.pc
@@ -1330,13 +1353,19 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       }
                       uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
                       if (current_ctx == 0) {
-                          
+                          current_ctx = ctx.mmu.read32(0x800000D0);
+                      }
+                      if (current_ctx == 0) {
+                          current_ctx = ctx.mmu.read32(0x800000E4);
+                      }
+                      if (current_ctx == 0) {
                           if (std::getenv("NWII_SAMPLE")) {
                               static int n = 0;
                               if (n++ < 4)
                                   std::cout << "[HLE PI] int " << std::dec
                                             << os_intr << " deferred: no current context\n";
                           }
+                          return false;
                       } else {
                           
                           nwii::runtime::hw::pi_intsr &= ~bit_to_clear;
@@ -1382,13 +1411,8 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       longjmp(ctx.exception_jmp_buf, 1);
                   } else {
                       
-                      static uint32_t last_null_pc = 0;
                       static int null_warn_count = 0;
-                      if (ctx.pc != last_null_pc) {
-                          null_warn_count = 0;
-                          last_null_pc = ctx.pc;
-                      }
-                      if (null_warn_count++ < 3)
+                       if (null_warn_count++ < 3)
                           std::cout << "[HLE PI] Handler for interrupt "
                                     << std::dec << os_intr
                                     << " is NULL (OS reinit in progress, deferring)."
@@ -1417,10 +1441,12 @@ bool process_pending_callbacks(CPUContext &ctx) {
     ctx.pending_cb_count.fetch_sub(1, std::memory_order_relaxed);
   }
 
-  std::cout << "[HLE Callback] Dispatching cb=0x" << std::hex << cb.cb_addr
-            << " arg1=0x" << cb.arg1 << " arg2=0x" << cb.arg2 << " from PC=0x"
-            << ctx.pc << " LR=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
-            << std::dec << std::endl;
+  if (std::getenv("NWII_SAMPLE")) {
+    std::cout << "[HLE Callback] Dispatching cb=0x" << std::hex << cb.cb_addr
+              << " arg1=0x" << cb.arg1 << " arg2=0x" << cb.arg2 << " from PC=0x"
+              << ctx.pc << " LR=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
+              << std::dec << std::endl;
+  }
 
   uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
   if (current_ctx != 0) {

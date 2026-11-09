@@ -79,6 +79,10 @@ struct MMU {
              (paddr >= 0x0D000000 && paddr < 0x0D010000);
   }
 
+  inline bool is_wgpipe(uint32_t paddr) const {
+      return (paddr & 0xFFFFF000u) == 0x0C008000 || (paddr & 0xFFFFF000u) == 0x0D008000;
+  }
+
   uint8_t read8(uint32_t addr) {
     uint32_t paddr = addr & 0x3FFFFFFF;
 
@@ -103,7 +107,7 @@ struct MMU {
     // The whole 0x0C008xxx page mirrors the write-gather pipe (Dolphin
 
     
-    if ((paddr & 0xFFFFF000u) == 0x0C008000) { GX_WGPIPE_Write8(value); return; } 
+    if (is_wgpipe(paddr)) { GX_WGPIPE_Write8(value); return; } 
     if (is_hw_reg(paddr)) return; 
 
     uint8_t *ptr = get_ptr(addr);
@@ -126,7 +130,7 @@ struct MMU {
     if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
       watch_hit(addr, value, 16);
 
-    if ((paddr & 0xFFFFF000u) == 0x0C008000) { GX_WGPIPE_Write16(value); return; } 
+    if (is_wgpipe(paddr)) { GX_WGPIPE_Write16(value); return; } 
     if (is_hw_reg(paddr)) { HW_Reg_Write16(paddr, value); return; }
 
     uint8_t *ptr = get_ptr(addr);
@@ -153,7 +157,7 @@ struct MMU {
     if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
       watch_hit(addr, value, 32);
 
-    if ((paddr & 0xFFFFF000u) == 0x0C008000) { GX_WGPIPE_Write32(value); return; }
+    if (is_wgpipe(paddr)) { GX_WGPIPE_Write32(value); return; }
     if (is_hw_reg(paddr)) { HW_Reg_Write32(paddr, value); return; }
 
     uint8_t *ptr = get_ptr(addr);
@@ -169,7 +173,7 @@ struct MMU {
     if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
       watch_hit(addr, v, 32);
 
-    if ((paddr & 0xFFFFF000u) == 0x0C008000) { GX_WGPIPE_WriteF32(value); return; } 
+    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF32(value); return; } 
 
     uint8_t *ptr = get_ptr(addr);
     if (ptr) {
@@ -185,7 +189,7 @@ struct MMU {
     if (g_watch_addr && (paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
       watch_hit(addr, v >> 32, 64);
 
-    if ((paddr & 0xFFFFF000u) == 0x0C008000) { GX_WGPIPE_WriteF64(value); return; } 
+    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF64(value); return; } 
 
     uint8_t *ptr = get_ptr(addr);
     if (ptr) {
@@ -204,6 +208,12 @@ struct MMU {
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (g_watch_addr && (paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
       watch_hit(addr, value >> 32, 64);
+
+    if (is_wgpipe(paddr)) {
+      GX_WGPIPE_Write32((uint32_t)(value >> 32));
+      GX_WGPIPE_Write32((uint32_t)(value & 0xFFFFFFFF));
+      return;
+    }
 
     uint8_t *ptr = get_ptr(addr);
     if (!ptr) return;

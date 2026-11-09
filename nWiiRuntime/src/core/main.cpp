@@ -37,6 +37,7 @@ bool init(const char *config_path = "config.toml") {
 void shutdown() {}
 } 
 
+extern uint64_t g_stat_draws;
 extern "C" void run_game(nwii::runtime::CPUContext &ctx);
 
 void cpu_thread_func(nwii::runtime::CPUContext *ctx) {
@@ -445,13 +446,17 @@ int main(int argc, char **argv) {
     
     uint64_t tick = 0;
     while (ctx->is_running) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      extern uint64_t g_stat_draws;
+      if (g_stat_draws > 0) std::this_thread::sleep_for(std::chrono::milliseconds(16));
 
-      
       nwii::runtime::input::InputManager::get().update();
 
       extern void ProcessGXFifo();
+      nwii::runtime::hw::cp_process_fifo();
       ProcessGXFifo();
+      if (ctx && (ctx->mmu.read32(0x806ab198) != 0 || ctx->mmu.read32(0x80796e50) != 0)) {
+        nwii::runtime::hw::cp_signal_draw_done();
+      }
       ctx->vblank_pending = true;
       if (std::getenv("NWII_SAMPLE") && (++tick % 60) == 0) {
         std::cout << "[Sample] pc=0x" << std::hex << ctx->pc << " lr=0x"
@@ -598,7 +603,11 @@ int main(int argc, char **argv) {
       }
 
       extern void ProcessGXFifo();
+      nwii::runtime::hw::cp_process_fifo();
       ProcessGXFifo();
+      if (ctx && (ctx->mmu.read32(0x806ab198) != 0 || ctx->mmu.read32(0x80796e50) != 0)) {
+        nwii::runtime::hw::cp_signal_draw_done();
+      }
 
       
 
@@ -702,6 +711,13 @@ int main(int argc, char **argv) {
           }
         }
 
+        static bool s_vsync_enabled = false;
+        extern uint64_t g_stat_draws;
+        if (g_stat_draws > 0 && !s_vsync_enabled) {
+          SDL_GL_SetSwapInterval(1);
+          s_vsync_enabled = true;
+          std::cout << "[Video] Initial loading complete. Switched to 60 FPS VSync." << std::endl;
+        }
         SDL_GL_SwapWindow(window);
       }
 
@@ -714,7 +730,7 @@ int main(int argc, char **argv) {
       }
       
       ctx->vblank_pending = true;
-      if (headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      if (headless && g_stat_draws > 0) std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     if (!headless) {

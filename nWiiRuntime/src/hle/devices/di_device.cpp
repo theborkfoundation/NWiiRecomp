@@ -79,19 +79,27 @@ public:
             if (!vd.valid())
                 vd.init(Config::get().game_dir);
 
-            std::cout << "[DI] " << (cmd == 0x71 ? "Read" : "UnencryptedRead")
-                      << ": offset=0x" << std::hex << offset << " len=0x" << length
-                      << " dst=0x" << dst << std::dec << std::endl;
+            if (std::getenv("NWII_SAMPLE")) {
+                std::cout << "[DI] " << (cmd == 0x71 ? "Read" : "UnencryptedRead")
+                          << ": offset=0x" << std::hex << offset << " len=0x" << length
+                          << " dst=0x" << dst << std::dec << std::endl;
+            }
 
             if (dst >= 0x80000000 && dst < 0x94000000 && length > 0 && length < 0x4000000) {
-                std::vector<uint8_t> tmp(length);
-                if (vd.valid() && vd.read(offset, length, tmp.data())) {
-                    for (uint32_t i = 0; i < length; ++i)
-                        ctx.mmu.write8(dst + i, tmp[i]);
+                uint8_t* target = ctx.mmu.get_ptr(dst);
+                if (target && vd.valid()) {
+                    vd.read(offset, length, target);
                 } else {
+                    std::vector<uint8_t> tmp(length);
+                    if (vd.valid() && vd.read(offset, length, tmp.data())) {
+                        for (uint32_t i = 0; i < length; ++i)
+                            ctx.mmu.write8(dst + i, tmp[i]);
+                    } else {
+                   
                     
                     di_read_internal_shared(&ctx.mmu, req.in_buf, req.out_buf, 0, 0, false,
                                             req.out_size);
+                }
                 }
             }
             return 1; 

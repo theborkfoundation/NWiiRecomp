@@ -200,11 +200,13 @@ void WiiPlatform::ios_ioctl_async(CPUContext& ctx) {
   uint32_t callback = ctx.gpr[9];
   uint32_t userdata = ctx.gpr[10];
 
-  std::cout << "[HLE IOS] IOS_IoctlAsync: PC=0x" << std::hex << ctx.pc << " LR=0x" << ctx.lr << " fd=" << std::dec << fd << " cmd=0x" << std::hex
-            << cmd << " inbuf=0x" << inbuf << " inlen=0x" << ctx.gpr[6]
-            << " outbuf=0x" << ctx.gpr[7] << " outlen=0x" << ctx.gpr[8]
-            << " cb=0x" << callback << " ud=0x" << userdata << std::dec
-            << std::endl;
+  if (std::getenv("NWII_SAMPLE")) {
+    std::cout << "[HLE IOS] IOS_IoctlAsync: PC=0x" << std::hex << ctx.pc << " LR=0x" << ctx.lr << " fd=" << std::dec << fd << " cmd=0x" << std::hex
+              << cmd << " inbuf=0x" << inbuf << " inlen=0x" << ctx.gpr[6]
+              << " outbuf=0x" << ctx.gpr[7] << " outlen=0x" << ctx.gpr[8]
+              << " cb=0x" << callback << " ud=0x" << userdata << std::dec
+              << std::endl;
+  }
 
   int32_t result = IPC_OK;
   IpcRequest req{};
@@ -228,12 +230,26 @@ void WiiPlatform::ios_ioctl_async(CPUContext& ctx) {
 void WiiPlatform::ios_ioctlv(CPUContext& ctx) {
   int32_t fd = (int32_t)ctx.gpr[3];
   uint32_t cmd = ctx.gpr[4];
+  uint32_t arg_in = ctx.gpr[5];
+  uint32_t arg_out = ctx.gpr[6];
+  uint32_t arg_array = ctx.gpr[7];
+
   std::cout << "[HLE IOS] IOS_Ioctlv: fd=" << fd << " cmd=0x" << std::hex << cmd
-            << std::dec << std::endl;
+            << " in=" << std::dec << arg_in << " out=" << arg_out << std::endl;
 
   IpcRequest req{};
   req.fd = fd;
   req.ioctl_cmd = cmd;
+  req.arg_cnt_in = arg_in;
+  req.arg_cnt_out = arg_out;
+
+  for (uint32_t i = 0; i < arg_in + arg_out; i++) {
+      IoctlvVector vec;
+      vec.addr = ctx.mmu.read32(arg_array + i * 8);
+      vec.len = ctx.mmu.read32(arg_array + i * 8 + 4);
+      req.ioctlv_vecs.push_back(vec);
+  }
+
   ctx.gpr[3] = IOSKernel::get().ioctlv(ctx, req);
   ctx.pc = ctx.lr;
 }

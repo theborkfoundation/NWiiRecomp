@@ -43,7 +43,7 @@ void register_pi(MMIODispatcher& dispatcher) {{
             if (addr == 0xCC003000) clear_pi_interrupt(val);
             if (addr == 0xCC003004) {
                 if (pi_intmr != val)
-                    std::cout << "[HW PI] INTMR change: 0x" << std::hex << pi_intmr
+                    if (std::getenv("NWII_DEBUG")) std::cout << "[HW PI] INTMR change: 0x" << std::hex << pi_intmr
                               << " -> 0x" << val << std::dec << std::endl;
                 pi_intmr = val;
             }

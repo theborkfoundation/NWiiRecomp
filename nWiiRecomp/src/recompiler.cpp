@@ -987,7 +987,6 @@ void Recompiler::emit_function(std::ostream &out,
     
 
     
-    out << "    ++ctx.inst_count;\n";
     emit_instruction(out, inst, func);
   }
 
@@ -1001,6 +1000,7 @@ void Recompiler::emit_instruction(std::ostream &out,
 
   out << "loc_" << std::hex << std::uppercase << inst.address << std::dec
       << ": ;\n";
+  out << "    ++ctx.inst_count;\n";
   out << "    // 0x" << std::hex << std::setfill('0') << std::setw(8)
       << inst.address << ": ";
   out << std::setfill('0') << std::setw(8) << inst.opcode << std::dec << "\n";

@@ -18,9 +18,20 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
     motes[0].ir_x = (float)mx / (float)w;
     motes[0].ir_y = (float)my / (float)h;
 
-    if (mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT)) motes[0].buttons |= 0x0800; 
-    if (mouse_state & SDL_BUTTON(SDL_BUTTON_RIGHT)) motes[0].buttons |= 0x0400; 
-    if (keys[SDL_SCANCODE_RETURN]) motes[0].buttons |= 0x0010; 
+    if (mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT) || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_X]) {
+        motes[0].buttons |= 0x0800; // Wiimote A
+    }
+    if (mouse_state & SDL_BUTTON(SDL_BUTTON_RIGHT) || keys[SDL_SCANCODE_Z]) {
+        motes[0].buttons |= 0x0400; // Wiimote B
+    }
+    if (keys[SDL_SCANCODE_1] || keys[SDL_SCANCODE_J]) {
+        motes[0].buttons |= 0x0002; // Wiimote 1
+    }
+    if (keys[SDL_SCANCODE_2] || keys[SDL_SCANCODE_K] || keys[SDL_SCANCODE_RETURN]) {
+        motes[0].buttons |= 0x0001; // Wiimote 2
+        motes[0].buttons |= 0x0800; // Wiimote A
+        motes[0].buttons |= 0x0010; // Wiimote Plus
+    }
     if (keys[SDL_SCANCODE_BACKSPACE]) motes[0].buttons |= 0x0001; 
     if (keys[SDL_SCANCODE_UP]) motes[0].buttons |= 0x0008; 
     if (keys[SDL_SCANCODE_DOWN]) motes[0].buttons |= 0x0004; 

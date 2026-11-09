@@ -696,7 +696,7 @@ void interpret_step(CPUContext& ctx) {
         }
     }
     static int announce_budget = 200;
-    if (announce_budget > 0) {
+    if (announce_budget > 0 && std::getenv("NWII_DEBUG")) {
         announce_budget--;
         std::cout << "[Interp] Interpreting at 0x" << std::hex << ctx.pc
                   << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]

@@ -55,7 +55,7 @@ void ipc_post_reply(uint32_t req_addr) {
 }
 
 void register_ipc(MMIODispatcher& dispatcher) {{
-    dispatcher.register_region(0xCD000000, 0xCD00FFFF, 
+    dispatcher.register_region(0xCD000000, 0xCD00001F, 
         [](uint32_t addr) -> uint32_t {
             switch (addr & 0x00FFFFFF) {
             case 0x000000: return ipc_ppc_msg;
@@ -84,7 +84,7 @@ void register_ipc(MMIODispatcher& dispatcher) {{
                         
                         result = ipc_dispatch_request(*g_ctx_ptr, ipc_ppc_msg);
                     }
-                    std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
+                    if (std::getenv("NWII_DEBUG")) std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
                     if (result != -0x70000001) { 
                         
                         ipc_ppc_ctrl &= ~0x01;
@@ -111,20 +111,20 @@ void register_ipc(MMIODispatcher& dispatcher) {{
             case 0x00000C: {
                 ipc_arm_ctrl &= ~(val & 0x03);
                 if (!(ipc_arm_ctrl & 3)) {
-                    if (std::getenv("NWII_SAMPLE") && (pi_intsr & 0x4000)) {
+                    if (std::getenv("NWII_SAMPLE") && (pi_intsr & 0x10)) {
                         static int n = 0;
                         if (n++ < 6)
                             std::cout << "[IPC] armctrl write 0x" << std::hex
                                       << val << " swallows pending irq\n" << std::dec;
                     }
-                    clear_pi_interrupt(0x00004000);
+                    clear_pi_interrupt(0x00000010);
                 }
                 break;
             }
             } 
         }
     );
-    dispatcher.register_region(0x0D000000, 0x0D00FFFF, 
+    dispatcher.register_region(0x0D000000, 0x0D00001F, 
         [&dispatcher](uint32_t a) { return dispatcher.read32(a | 0xC0000000); },
         [&dispatcher](uint32_t a, uint32_t v) { dispatcher.write32(a | 0xC0000000, v); }
     );

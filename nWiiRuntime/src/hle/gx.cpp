@@ -232,6 +232,7 @@ void ProcessGXFifo() {
     uint64_t decode_us =
         std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
     g_stat_parse_us += decode_us;
+    nwii::runtime::hw::cp_signal_draw_done();
 
     // [GXPROF]: once a second, split the drain cost by cause. Prints in
     // headless too (the [STAT] line is window-only), so the 3D-scene
@@ -244,7 +245,7 @@ void ProcessGXFifo() {
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last).count() >= 2) {
             last = now;
-            std::cout << "[GXPROF] parse+decode_ms=" << g_stat_parse_us / 1000
+            if (std::getenv("NWII_DEBUG")) std::cout << "[GXPROF] parse+decode_ms=" << g_stat_parse_us / 1000
                       << " (decode_ms=" << g_prof_decode_us_accum / 1000 << ")"
                       << " draws_snap=" << fp::g_prof_draws
                       << " draw_bytes=" << fp::g_prof_draw_bytes

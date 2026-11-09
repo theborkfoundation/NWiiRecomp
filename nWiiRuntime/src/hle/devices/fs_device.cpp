@@ -82,7 +82,7 @@ public:
         }
         if (path == "/dev/fs")
             return IPC_OK; 
-        std::cout << "[FS] open: no such file " << path << std::endl;
+        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] open: no such file " << path << std::endl;
         return IPC_ENOENT; 
     }
     
@@ -150,6 +150,60 @@ public:
             else if (whence == 1) h.pos += offset; 
             else if (whence == 2) h.pos = f.data.size() + offset; 
             return h.pos;
+        }
+        return IPC_OK;
+    }
+
+    int32_t ioctl(CPUContext& ctx, const IpcRequest& req) override {
+        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] ioctl fd=" << req.fd << " cmd=0x" << std::hex << req.ioctl_cmd << std::dec << std::endl;
+        if (req.ioctl_cmd == 0x02) { // ISFS_IOCTL_GETSTATS
+            if (req.out_buf && req.out_size >= 28) {
+                ctx.mmu.write32(req.out_buf + 0, 16384);  // Cluster size (16KB)
+                ctx.mmu.write32(req.out_buf + 4, 20000);  // Free clusters
+                ctx.mmu.write32(req.out_buf + 8, 1000);   // Used clusters
+                ctx.mmu.write32(req.out_buf + 12, 0);     // Bad clusters
+                ctx.mmu.write32(req.out_buf + 16, 0);     // Reserved clusters
+                ctx.mmu.write32(req.out_buf + 20, 5000);  // Free inodes
+                ctx.mmu.write32(req.out_buf + 24, 100);   // Used inodes
+                return IPC_OK;
+            }
+        }
+        return IPC_OK;
+    }
+
+    int32_t ioctlv(CPUContext& ctx, const IpcRequest& req) override {
+        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] ioctlv fd=" << req.fd << " cmd=0x" << std::hex << req.ioctl_cmd 
+                  << " vecs=" << req.ioctlv_vecs.size() << std::dec << std::endl;
+        if (req.ioctl_cmd == 0x0C) { // ISFS_IOCTL_GETUSAGE
+            std::string path;
+            if (!req.ioctlv_vecs.empty()) {
+                uint32_t p = req.ioctlv_vecs[0].addr;
+                for (int i = 0; i < 64; ++i) {
+                    char c = (char)ctx.mmu.read8(p + i);
+                    if (!c) break;
+                    path += c;
+                }
+            }
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] ISFS_GetUsage path="" << path << """ << std::endl;
+            if (req.ioctlv_vecs.size() > 1 && req.ioctlv_vecs[1].addr) {
+                ctx.mmu.write32(req.ioctlv_vecs[1].addr, 500); // 500 clusters used
+            }
+            if (req.ioctlv_vecs.size() > 2 && req.ioctlv_vecs[2].addr) {
+                ctx.mmu.write32(req.ioctlv_vecs[2].addr, 10); // 10 inodes used
+            }
+            return IPC_OK;
+        } else if (req.ioctl_cmd == 0x02) { // ISFS_IOCTL_GETSTATS
+            if (req.ioctlv_vecs.size() > req.arg_cnt_in) {
+                uint32_t p = req.ioctlv_vecs[req.arg_cnt_in].addr;
+                ctx.mmu.write32(p + 0, 16384);  // Cluster size (16KB)
+                ctx.mmu.write32(p + 4, 20000);  // Free clusters
+                ctx.mmu.write32(p + 8, 1000);   // Used clusters
+                ctx.mmu.write32(p + 12, 0);     // Bad clusters
+                ctx.mmu.write32(p + 16, 0);     // Reserved clusters
+                ctx.mmu.write32(p + 20, 5000);  // Free inodes
+                ctx.mmu.write32(p + 24, 100);   // Used inodes
+                return IPC_OK;
+            }
         }
         return IPC_OK;
     }

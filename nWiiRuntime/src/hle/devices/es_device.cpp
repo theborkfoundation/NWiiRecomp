@@ -13,11 +13,11 @@ public:
     }
     
     int32_t ioctl(CPUContext& ctx, const IpcRequest& req) override {
-        std::cout << "[ES] ioctl cmd=" << req.ioctl_cmd << std::endl;
+        if (std::getenv("NWII_DEBUG")) std::cout << "[ES] ioctl cmd=" << req.ioctl_cmd << std::endl;
         return IPC_OK;
     }
     int32_t ioctlv(CPUContext& ctx, const IpcRequest& req) override {
-        std::cout << "[ES] ioctlv cmd=0x" << std::hex << req.ioctl_cmd << std::dec 
+        if (std::getenv("NWII_DEBUG")) std::cout << "[ES] ioctlv cmd=0x" << std::hex << req.ioctl_cmd << std::dec 
                   << " in=" << req.arg_cnt_in << " out=" << req.arg_cnt_out << std::endl;
 
         for (uint32_t i = req.arg_cnt_in; i < req.arg_cnt_in + req.arg_cnt_out; i++) {
@@ -33,7 +33,7 @@ public:
                 }
             }
         }
-        std::cout << "[ES] Output vectors zeroed.\n";
+        if (std::getenv("NWII_DEBUG")) std::cout << "[ES] Output vectors zeroed.\n";
 
         
         if (req.ioctl_cmd == 0x20) { 
@@ -49,7 +49,7 @@ public:
                     }
                     ctx.mmu.write32(view_addr + 0, title_id_high);
                     ctx.mmu.write32(view_addr + 4, title_id_low); 
-                    std::cout << "[ES] Returned Title ID 00010000-" << std::hex << title_id_low << std::dec << " (" << gid << ")\n";
+                    if (std::getenv("NWII_DEBUG")) std::cout << "[ES] Returned Title ID 00010000-" << std::hex << title_id_low << std::dec << " (" << gid << ")\n";
                 } else {
                     std::cout << "[ES] Warning: ES_GetTitleId output buffer too small (len=" << view_len << ")\n";
                 }
@@ -110,7 +110,7 @@ public:
                     ctx.mmu.write32(view_addr + 0x14, title_id_low);
                     ctx.mmu.write16(view_addr + 0x18, 0xFFFF); 
                     
-                    std::cout << "[ES] Returning TicketView for TitleID " << std::hex << title_id_high << "-" << title_id_low << std::dec << std::endl;
+                    if (std::getenv("NWII_DEBUG")) std::cout << "[ES] Returning TicketView for TitleID " << std::hex << title_id_high << "-" << title_id_low << std::dec << std::endl;
                 }
             }
             return IPC_OK;
