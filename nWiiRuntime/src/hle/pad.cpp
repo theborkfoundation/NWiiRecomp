@@ -12,80 +12,86 @@ void WPADInit(CPUContext& ctx) {}
 void KPADInit(CPUContext& ctx) {}
 
 void PADRead(CPUContext& ctx) {
+    static int n = 0; if (n++ < 5) std::cout << "[PADRead] called" << std::endl;
     uint32_t pad_status_array_addr = ctx.gpr[3];
     GameCubePadState state = InputManager::get().get_gcpad_state(0);
 
-    ctx.mmu.write16(pad_status_array_addr, state.buttons);
-    ctx.mmu.write8(pad_status_array_addr + 2, (uint8_t)state.stick_x);
-    ctx.mmu.write8(pad_status_array_addr + 3, (uint8_t)state.stick_y);
-    ctx.mmu.write8(pad_status_array_addr + 4, (uint8_t)state.substick_x);
-    ctx.mmu.write8(pad_status_array_addr + 5, (uint8_t)state.substick_y);
-    ctx.mmu.write8(pad_status_array_addr + 6, state.trigger_l);
-    ctx.mmu.write8(pad_status_array_addr + 7, state.trigger_r);
-    ctx.mmu.write8(pad_status_array_addr + 8, state.buttons & 0x0100 ? 0xFF : 0);
-    ctx.mmu.write8(pad_status_array_addr + 9, state.buttons & 0x0200 ? 0xFF : 0);
-    ctx.mmu.write8(pad_status_array_addr + 10, state.err);
-    ctx.mmu.write8(pad_status_array_addr + 11, 0);
-
-    for (int i = 1; i < 4; i++) {
-        uint32_t offset = pad_status_array_addr + (i * 12);
-        ctx.mmu.write16(offset, 0);
-        ctx.mmu.write8(offset + 10, (uint8_t)-1); 
+    if (pad_status_array_addr >= 0x80000000 && pad_status_array_addr < 0x81800000) {
+        ctx.mmu.write16(pad_status_array_addr + 0, state.buttons);
+        ctx.mmu.write8(pad_status_array_addr + 2, state.stick_x);
+        ctx.mmu.write8(pad_status_array_addr + 3, state.stick_y);
+        ctx.mmu.write8(pad_status_array_addr + 4, state.substick_x);
+        ctx.mmu.write8(pad_status_array_addr + 5, state.substick_y);
+        ctx.mmu.write8(pad_status_array_addr + 6, state.trigger_l);
+        ctx.mmu.write8(pad_status_array_addr + 7, state.trigger_r);
+        ctx.mmu.write8(pad_status_array_addr + 8, state.analog_a);
+        ctx.mmu.write8(pad_status_array_addr + 9, state.analog_b);
+        ctx.mmu.write8(pad_status_array_addr + 10, state.err);
+        ctx.gpr[3] = 1; 
+    } else {
+        ctx.gpr[3] = 0;
     }
+    ctx.pc = ctx.lr;
 }
 
 void WPADRead(CPUContext& ctx) {
+    static int n = 0; if (n++ < 5) std::cout << "[WPADRead] called chan=" << ctx.gpr[3] << std::endl;
     int32_t chan = (int32_t)ctx.gpr[3];
     uint32_t data_ptr = ctx.gpr[4];
 
-    if (chan >= 0 && chan < 4 && data_ptr != 0) {
-        WiimoteState state = InputManager::get().get_wiimote_state(chan);
-        ctx.mmu.write32(data_ptr + 0x00, state.err);
-        ctx.mmu.write32(data_ptr + 0x04, state.buttons);
+    if (chan == 0 && data_ptr >= 0x80000000 && data_ptr < 0x81800000) {
+        WiimoteState state = InputManager::get().get_wiimote_state(0);
+        ctx.mmu.write16(data_ptr + 0, (uint16_t)state.buttons);
+        ctx.mmu.write8(data_ptr + 2, (uint8_t)state.err);
     }
-    ctx.gpr[3] = 0; 
+    ctx.pc = ctx.lr;
 }
 
 void KPADRead(CPUContext& ctx) {
+    static int n = 0; if (n++ < 5) std::cout << "[KPADRead] called chan=" << ctx.gpr[3] << std::endl;
     int32_t chan = (int32_t)ctx.gpr[3];
     uint32_t data_array_ptr = ctx.gpr[4];
     uint32_t length = ctx.gpr[5];
 
-    int read_count = 0;
-    if (chan >= 0 && chan < 4 && data_array_ptr != 0 && length > 0) {
-        WiimoteState state = InputManager::get().get_wiimote_state(chan);
+    if (chan == 0 && data_array_ptr >= 0x80000000 && length > 0) {
+        WiimoteState state = InputManager::get().get_wiimote_state(0);
+        
+        static uint32_t prev_buttons = 0;
+        uint32_t hold = state.buttons;
+        uint32_t trigger = hold & ~prev_buttons;
+        uint32_t release = ~hold & prev_buttons;
+        prev_buttons = hold;
 
-        if (state.err == 0) {
-            static uint32_t prev_buttons[4] = {};
-            uint32_t hold    = state.buttons;
-            uint32_t trigger = hold & ~prev_buttons[chan];  
-            uint32_t release = ~hold & prev_buttons[chan];  
-            prev_buttons[chan] = hold;
+        ctx.mmu.write32(data_array_ptr + 0x00, hold);
+        ctx.mmu.write32(data_array_ptr + 0x04, trigger);
+        ctx.mmu.write32(data_array_ptr + 0x08, release);
 
-            ctx.mmu.write32(data_array_ptr + 0x00, hold);
-            ctx.mmu.write32(data_array_ptr + 0x04, trigger);
-            ctx.mmu.write32(data_array_ptr + 0x08, release);
-            
-            ctx.mmu.write32(data_array_ptr + 0x0C, 0);
-            ctx.mmu.write32(data_array_ptr + 0x10, 0);
-            ctx.mmu.write32(data_array_ptr + 0x14, 0);
-            
-            for (int b = 0x18; b < 0x48; b += 4)
-                ctx.mmu.write32(data_array_ptr + b, 0);
-            
-            ctx.mmu.write32(data_array_ptr + 0x48, 0);
-            
-            ctx.mmu.write32(data_array_ptr + 0x4C, 0);
+        int32_t acc_x = 0;
+        int32_t acc_y = 0;
+        int32_t acc_z = 0x40000000; 
 
-            read_count = 1;
-        }
+        ctx.mmu.write32(data_array_ptr + 0x0C, acc_x);
+        ctx.mmu.write32(data_array_ptr + 0x10, acc_y);
+        ctx.mmu.write32(data_array_ptr + 0x14, acc_z);
+
+        float dp_x = state.ir_x * 2.0f - 1.0f;
+        float dp_y = state.ir_y * 2.0f - 1.0f;
+        ctx.mmu.write32(data_array_ptr + 0x18, *(uint32_t*)&dp_x);
+        ctx.mmu.write32(data_array_ptr + 0x1C, *(uint32_t*)&dp_y);
+
+        ctx.mmu.write8(data_array_ptr + 0x28, (uint8_t)state.err);
+
+        ctx.gpr[3] = 1; 
+    } else {
+        ctx.gpr[3] = 0;
     }
-    ctx.gpr[3] = read_count;
-}
-
+    ctx.pc = ctx.lr;
 } 
 
+} // extern "C"
+
 void hle_wpad_probe(CPUContext& ctx) {
+    static int n = 0; if (n++ < 5) std::cout << "[hle_wpad_probe] called chan=" << ctx.gpr[3] << std::endl;
     uint32_t chan = ctx.gpr[3];
     uint32_t dev_type_ptr = ctx.gpr[4];
 
@@ -94,8 +100,8 @@ void hle_wpad_probe(CPUContext& ctx) {
     if (ch0 >= 0x80000000 && ch0 < 0x81800000) {
         ctx.mmu.write32(ch0 + 2304, 0); // WPAD_ERR_NONE
         ctx.mmu.write8(ch0 + 2309, 0);  // WPAD_DEV_CORE
-        ctx.mmu.write32(ch0 + 2336, 1); // Handshake complete
-        ctx.mmu.write32(ch0 + 2300, 42);// Data format size
+        ctx.mmu.write32(ch0 + 2336, 1); // connected
+        ctx.mmu.write32(ch0 + 2300, 42); // non-zero state
     }
 
     if (chan == 0) {
@@ -136,11 +142,9 @@ void hle_kpad_read_ex(CPUContext& ctx) {
         WiimoteState state = InputManager::get().get_wiimote_state(0);
         uint32_t buttons = state.buttons;
 
-        // Auto-pulse button 2 (0x0001) and button A (0x0800) periodically:
-        // 30 frames pressed, 30 frames released.
-        // This advances through strap screen, Ubisoft/UbiArt logos, and menus automatically.
-        if (s_kpad_reads > 60 && (s_kpad_reads % 60) < 30) {
-            buttons |= 0x0801; // Wiimote 2 | Wiimote A
+        // Auto-advance past strap screen if unattended/automated test (brief pulse at ~4 seconds)
+        if (s_kpad_reads >= 240 && s_kpad_reads <= 245) {
+            buttons |= 0x0001;
         }
 
         static uint32_t prev_buttons = 0;
@@ -172,7 +176,7 @@ void hle_kpad_read_ex(CPUContext& ctx) {
             ctx.mmu.write32(p_result, 0);
         }
 
-        if ((s_kpad_reads % 120) == 1) {
+        if (hold != 0 && (s_kpad_reads % 60) == 1) {
             std::cout << "[KPAD] ReadEx chan=" << chan << " hold=0x" << std::hex << hold
                       << " trig=0x" << trigger << " reads=" << std::dec << s_kpad_reads << std::endl;
         }

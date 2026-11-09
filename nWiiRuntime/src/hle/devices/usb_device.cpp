@@ -74,8 +74,15 @@ public:
 
             
             
-            if (!m_events.empty())
-                return deliver_event(ctx, out_ptr, out_len);
+            if (!m_events.empty()) {
+                int32_t n = deliver_event(ctx, out_ptr, out_len);
+                if (req.req_addr != 0) {
+                    ctx.mmu.write32(req.req_addr + 4, (uint32_t)n);
+                    nwii::runtime::hw::ipc_post_reply(req.req_addr);
+                    return IPC_NO_REPLY;
+                }
+                return n;
+            }
             if (out_ptr != 0) {
                 m_pending_intr.push_back({req.req_addr, out_ptr, out_len});
                 return IPC_NO_REPLY;
