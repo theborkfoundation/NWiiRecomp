@@ -54,182 +54,363 @@ struct CallbackInfo {
 void watch_hit(uint32_t addr, uint32_t value, int width);
 extern uint32_t g_watch_addr;
 
-// Strict Dolphin-accurate MMU
+// Strict Dolphin-accurate MMU with inlined fast-path
 struct MMU {
   std::vector<uint8_t> mem1;
   std::vector<uint8_t> mem2;
+  uint8_t* mem1_ptr = nullptr;
+  uint8_t* mem2_ptr = nullptr;
 
   MMU() {
     mem1.resize(24 * 1024 * 1024 + 8, 0); 
     mem2.resize(64 * 1024 * 1024 + 8, 0); 
+    mem1_ptr = mem1.data();
+    mem2_ptr = mem2.data();
   }
 
-  inline uint8_t *get_ptr(uint32_t addr) {
+  MMU(const MMU& other) : mem1(other.mem1), mem2(other.mem2) {
+    mem1_ptr = mem1.data();
+    mem2_ptr = mem2.data();
+  }
+
+  MMU& operator=(const MMU& other) {
+    if (this != &other) {
+      mem1 = other.mem1;
+      mem2 = other.mem2;
+      mem1_ptr = mem1.data();
+      mem2_ptr = mem2.data();
+    }
+    return *this;
+  }
+
+  MMU(MMU&& other) noexcept : mem1(std::move(other.mem1)), mem2(std::move(other.mem2)) {
+    mem1_ptr = mem1.data();
+    mem2_ptr = mem2.data();
+  }
+
+  MMU& operator=(MMU&& other) noexcept {
+    if (this != &other) {
+      mem1 = std::move(other.mem1);
+      mem2 = std::move(other.mem2);
+      mem1_ptr = mem1.data();
+      mem2_ptr = mem2.data();
+    }
+    return *this;
+  }
+
+  inline uint8_t *get_ptr(uint32_t addr) const {
     uint32_t paddr = addr & 0x3FFFFFFF; 
-    if (paddr < mem1.size() - 8) {
-        return &mem1[paddr];
-    } else if (paddr >= 0x10000000 && paddr < 0x10000000 + mem2.size() - 8) {
-        return &mem2[paddr - 0x10000000];
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      return mem1_ptr + paddr;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      return mem2_ptr + offset2;
     }
     return nullptr;
   }
 
   inline bool is_hw_reg(uint32_t paddr) const {
-      return (paddr >= 0x0C000000 && paddr < 0x0C010000) || 
-             (paddr >= 0x0D000000 && paddr < 0x0D010000);
+    return (paddr >= 0x0C000000 && paddr < 0x0C010000) || 
+           (paddr >= 0x0D000000 && paddr < 0x0D010000);
   }
 
   inline bool is_wgpipe(uint32_t paddr) const {
-      return (paddr & 0xFFFFF000u) == 0x0C008000 || (paddr & 0xFFFFF000u) == 0x0D008000;
-  }
-
-  uint8_t read8(uint32_t addr) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-
-    if (is_hw_reg(paddr)) {
-        
-        uint32_t val = HW_Reg_Read32(paddr & ~3);
-        int shift = 24 - ((paddr & 3) * 8);
-        return (val >> shift) & 0xFF;
-    }
-    uint8_t *ptr = get_ptr(addr);
-    return ptr ? *ptr : 0;
+    return (paddr & 0xFFFFF000u) == 0x0C008000 || (paddr & 0xFFFFF000u) == 0x0D008000;
   }
 
   void custom_watch(uint32_t, uint32_t, int) {}
 
-  void write8(uint32_t addr, uint8_t value) {
-    custom_watch(addr, value, 8);
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
-      watch_hit(addr, value, 8);
-
-    // The whole 0x0C008xxx page mirrors the write-gather pipe (Dolphin
-
-    
-    if (is_wgpipe(paddr)) { GX_WGPIPE_Write8(value); return; } 
-    if (is_hw_reg(paddr)) return; 
-
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) *ptr = value;
-  }
-
-  uint16_t read16(uint32_t addr) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-
-    if (is_hw_reg(paddr)) return HW_Reg_Read16(paddr);
-    
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) return (ptr[0] << 8) | ptr[1];
+  // Slow-path fallback handlers (out-of-line)
+  __attribute__((noinline)) uint8_t read8_slow(uint32_t paddr) const {
+    if (is_hw_reg(paddr)) {
+      uint32_t val = HW_Reg_Read32(paddr & ~3);
+      int shift = 24 - ((paddr & 3) * 8);
+      return (val >> shift) & 0xFF;
+    }
     return 0;
   }
 
-  void write16(uint32_t addr, uint16_t value) {
-    custom_watch(addr, value, 16);
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
-      watch_hit(addr, value, 16);
+  __attribute__((noinline)) void write8_slow(uint32_t paddr, uint8_t value) {
+    if (is_wgpipe(paddr)) { GX_WGPIPE_Write8(value); return; }
+    if (is_hw_reg(paddr)) return; 
+  }
 
-    if (is_wgpipe(paddr)) { GX_WGPIPE_Write16(value); return; } 
+  __attribute__((noinline)) uint16_t read16_slow(uint32_t paddr) const {
+    if (is_hw_reg(paddr)) return HW_Reg_Read16(paddr);
+    return 0;
+  }
+
+  __attribute__((noinline)) void write16_slow(uint32_t paddr, uint16_t value) {
+    if (is_wgpipe(paddr)) { GX_WGPIPE_Write16(value); return; }
     if (is_hw_reg(paddr)) { HW_Reg_Write16(paddr, value); return; }
-
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) { ptr[0] = value >> 8; ptr[1] = value & 0xFF; }
   }
 
-  uint32_t read32(uint32_t addr) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    if (paddr == 0x0000000C) return 0; 
-
+  __attribute__((noinline)) uint32_t read32_slow(uint32_t paddr) const {
     if (is_hw_reg(paddr)) return HW_Reg_Read32(paddr);
-
-    uint8_t *ptr = get_ptr(addr);
-    if (!ptr) return 0;
-    uint32_t val = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16) | ((uint32_t)ptr[2] << 8) | ptr[3];
-
-    return val;
+    return 0;
   }
 
-  void write32(uint32_t addr, uint32_t value) {
-    custom_watch(addr, value, 32);
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    if (paddr == 0x0000000C) return; 
-    if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
-      watch_hit(addr, value, 32);
-
+  __attribute__((noinline)) void write32_slow(uint32_t paddr, uint32_t value) {
     if (is_wgpipe(paddr)) { GX_WGPIPE_Write32(value); return; }
     if (is_hw_reg(paddr)) { HW_Reg_Write32(paddr, value); return; }
-
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) { ptr[0] = value >> 24; ptr[1] = (value >> 16) & 0xFF; ptr[2] = (value >> 8) & 0xFF; ptr[3] = value & 0xFF; }
   }
 
-  float read_f32(uint32_t addr) { uint32_t val = read32(addr); float f; std::memcpy(&f, &val, 4); return f; }
-  void write_f32(uint32_t addr, float value) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    
-    uint32_t v;
-    std::memcpy(&v, &value, sizeof(float));
-    if (g_watch_addr && (paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
-      watch_hit(addr, v, 32);
-
-    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF32(value); return; } 
-
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) {
-      ptr[0] = v >> 24; ptr[1] = (v >> 16) & 0xFF; ptr[2] = (v >> 8) & 0xFF; ptr[3] = v & 0xFF;
-    }
-  }
-
-  void write_f64(uint32_t addr, double value) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    
-    uint64_t v;
-    std::memcpy(&v, &value, sizeof(double));
-    if (g_watch_addr && (paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
-      watch_hit(addr, v >> 32, 64);
-
-    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF64(value); return; } 
-
-    uint8_t *ptr = get_ptr(addr);
-    if (ptr) {
-      ptr[0] = v >> 56; ptr[1] = (v >> 48) & 0xFF; ptr[2] = (v >> 40) & 0xFF; ptr[3] = (v >> 32) & 0xFF;
-      ptr[4] = (v >> 24) & 0xFF; ptr[5] = (v >> 16) & 0xFF; ptr[6] = (v >> 8) & 0xFF; ptr[7] = v & 0xFF;
-    }
-  }
-
-  uint64_t read64(uint32_t addr) {
-    uint8_t *ptr = get_ptr(addr);
-    if (!ptr) return 0;
-    return ((uint64_t)ptr[0] << 56) | ((uint64_t)ptr[1] << 48) | ((uint64_t)ptr[2] << 40) | ((uint64_t)ptr[3] << 32) |
-           ((uint64_t)ptr[4] << 24) | ((uint64_t)ptr[5] << 16) | ((uint64_t)ptr[6] << 8) | ptr[7];
-  }
-  void write64(uint32_t addr, uint64_t value) {
-    uint32_t paddr = addr & 0x3FFFFFFF;
-    if (g_watch_addr && (paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
-      watch_hit(addr, value >> 32, 64);
-
+  __attribute__((noinline)) void write64_slow(uint32_t paddr, uint64_t value) {
     if (is_wgpipe(paddr)) {
       GX_WGPIPE_Write32((uint32_t)(value >> 32));
       GX_WGPIPE_Write32((uint32_t)(value & 0xFFFFFFFF));
+    }
+  }
+
+  __attribute__((noinline)) void write_f32_slow(uint32_t paddr, float value) {
+    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF32(value); return; }
+  }
+
+  __attribute__((noinline)) void write_f64_slow(uint32_t paddr, double value) {
+    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF64(value); return; }
+  }
+
+  // Fast-path inlined operations
+  __attribute__((always_inline)) inline uint8_t read8(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      return mem1_ptr[paddr];
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      return mem2_ptr[offset2];
+    }
+    return read8_slow(paddr);
+  }
+
+  __attribute__((always_inline)) inline void write8(uint32_t addr, uint8_t value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+        watch_hit(addr, value, 8);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      mem1_ptr[paddr] = value;
       return;
     }
-
-    uint8_t *ptr = get_ptr(addr);
-    if (!ptr) return;
-    ptr[0] = value >> 56; ptr[1] = (value >> 48) & 0xFF; ptr[2] = (value >> 40) & 0xFF; ptr[3] = (value >> 32) & 0xFF;
-    ptr[4] = (value >> 24) & 0xFF; ptr[5] = (value >> 16) & 0xFF; ptr[6] = (value >> 8) & 0xFF; ptr[7] = value & 0xFF;
-  }
-  double read_f64(uint32_t addr) { 
-      uint8_t *ptr = get_ptr(addr);
-      if (ptr) {
-          uint64_t val = ((uint64_t)ptr[0] << 56) | ((uint64_t)ptr[1] << 48) | ((uint64_t)ptr[2] << 40) | ((uint64_t)ptr[3] << 32) |
-                         ((uint64_t)ptr[4] << 24) | ((uint64_t)ptr[5] << 16) | ((uint64_t)ptr[6] << 8) | ptr[7];
-          double f; std::memcpy(&f, &val, 8); return f;
-      }
-      return 0.0;
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      mem2_ptr[offset2] = value;
+      return;
+    }
+    write8_slow(paddr, value);
   }
 
+  __attribute__((always_inline)) inline uint16_t read16(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint16_t val;
+      std::memcpy(&val, mem1_ptr + paddr, 2);
+      return __builtin_bswap16(val);
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint16_t val;
+      std::memcpy(&val, mem2_ptr + offset2, 2);
+      return __builtin_bswap16(val);
+    }
+    return read16_slow(paddr);
+  }
+
+  __attribute__((always_inline)) inline void write16(uint32_t addr, uint16_t value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+        watch_hit(addr, value, 16);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint16_t swp = __builtin_bswap16(value);
+      std::memcpy(mem1_ptr + paddr, &swp, 2);
+      return;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint16_t swp = __builtin_bswap16(value);
+      std::memcpy(mem2_ptr + offset2, &swp, 2);
+      return;
+    }
+    write16_slow(paddr, value);
+  }
+
+  __attribute__((always_inline)) inline uint32_t read32(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      if (__builtin_expect(paddr == 0x0000000Cu, 0)) return 0;
+      uint32_t val;
+      std::memcpy(&val, mem1_ptr + paddr, 4);
+      return __builtin_bswap32(val);
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint32_t val;
+      std::memcpy(&val, mem2_ptr + offset2, 4);
+      return __builtin_bswap32(val);
+    }
+    return read32_slow(paddr);
+  }
+
+  __attribute__((always_inline)) inline void write32(uint32_t addr, uint32_t value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+        watch_hit(addr, value, 32);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      if (__builtin_expect(paddr == 0x0000000Cu, 0)) return;
+      uint32_t swp = __builtin_bswap32(value);
+      std::memcpy(mem1_ptr + paddr, &swp, 4);
+      return;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint32_t swp = __builtin_bswap32(value);
+      std::memcpy(mem2_ptr + offset2, &swp, 4);
+      return;
+    }
+    write32_slow(paddr, value);
+  }
+
+  __attribute__((always_inline)) inline float read_f32(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      if (__builtin_expect(paddr == 0x0000000Cu, 0)) return 0.0f;
+      uint32_t val;
+      std::memcpy(&val, mem1_ptr + paddr, 4);
+      val = __builtin_bswap32(val);
+      float f;
+      std::memcpy(&f, &val, 4);
+      return f;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint32_t val;
+      std::memcpy(&val, mem2_ptr + offset2, 4);
+      val = __builtin_bswap32(val);
+      float f;
+      std::memcpy(&f, &val, 4);
+      return f;
+    }
+    uint32_t val = read32_slow(paddr);
+    float f;
+    std::memcpy(&f, &val, 4);
+    return f;
+  }
+
+  __attribute__((always_inline)) inline void write_f32(uint32_t addr, float value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      uint32_t v;
+      std::memcpy(&v, &value, 4);
+      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+        watch_hit(addr, v, 32);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint32_t v;
+      std::memcpy(&v, &value, 4);
+      v = __builtin_bswap32(v);
+      std::memcpy(mem1_ptr + paddr, &v, 4);
+      return;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint32_t v;
+      std::memcpy(&v, &value, 4);
+      v = __builtin_bswap32(v);
+      std::memcpy(mem2_ptr + offset2, &v, 4);
+      return;
+    }
+    write_f32_slow(paddr, value);
+  }
+
+  __attribute__((always_inline)) inline uint64_t read64(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint64_t val;
+      std::memcpy(&val, mem1_ptr + paddr, 8);
+      return __builtin_bswap64(val);
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint64_t val;
+      std::memcpy(&val, mem2_ptr + offset2, 8);
+      return __builtin_bswap64(val);
+    }
+    return 0;
+  }
+
+  __attribute__((always_inline)) inline void write64(uint32_t addr, uint64_t value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      if ((paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
+        watch_hit(addr, value >> 32, 64);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint64_t swp = __builtin_bswap64(value);
+      std::memcpy(mem1_ptr + paddr, &swp, 8);
+      return;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint64_t swp = __builtin_bswap64(value);
+      std::memcpy(mem2_ptr + offset2, &swp, 8);
+      return;
+    }
+    write64_slow(paddr, value);
+  }
+
+  __attribute__((always_inline)) inline double read_f64(uint32_t addr) const {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint64_t val;
+      std::memcpy(&val, mem1_ptr + paddr, 8);
+      val = __builtin_bswap64(val);
+      double f;
+      std::memcpy(&f, &val, 8);
+      return f;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint64_t val;
+      std::memcpy(&val, mem2_ptr + offset2, 8);
+      val = __builtin_bswap64(val);
+      double f;
+      std::memcpy(&f, &val, 8);
+      return f;
+    }
+    return 0.0;
+  }
+
+  __attribute__((always_inline)) inline void write_f64(uint32_t addr, double value) {
+    uint32_t paddr = addr & 0x3FFFFFFF;
+    if (__builtin_expect(g_watch_addr != 0, 0)) {
+      uint64_t v;
+      std::memcpy(&v, &value, 8);
+      if ((paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
+        watch_hit(addr, v >> 32, 64);
+    }
+    if (__builtin_expect(paddr < 0x01800000u, 1)) {
+      uint64_t v;
+      std::memcpy(&v, &value, 8);
+      v = __builtin_bswap64(v);
+      std::memcpy(mem1_ptr + paddr, &v, 8);
+      return;
+    }
+    uint32_t offset2 = paddr - 0x10000000u;
+    if (__builtin_expect(offset2 < 0x04000000u, 1)) {
+      uint64_t v;
+      std::memcpy(&v, &value, 8);
+      v = __builtin_bswap64(v);
+      std::memcpy(mem2_ptr + offset2, &v, 8);
+      return;
+    }
+    write_f64_slow(paddr, value);
+  }
 };
 
 struct CPUContext {
