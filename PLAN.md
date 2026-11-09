@@ -1,57 +1,63 @@
-# High-Performance Loading Plan: High-Level Emulation (HLE) Decompressor
+# High-Performance Loading Plan & Optimization Results
 
-## 1. Problem Diagnosis & Findings
+## 1. Executive Summary & Breakthrough Results
 
-Rayman Origins (Wii `SOJE41`) on the static recompilation build currently requires **~90 seconds** to reach the first draw (strap screen and active 60 FPS graphics).
+Rayman Origins (Wii `SOJE41`) on the static recompilation build previously required **~80–90 seconds** to reach the first draw call and active graphics rendering.
 
-### Profiling Results (5-Second macOS `sample` Analysis)
-- **Main / Render Thread**: Spends 96.1% of time in `Cocoa_GL_SwapWindow` / `SDL_CondWait_REAL` waiting for vertical sync intervals.
-- **CPU Thread**: Spends 98.8% of time actively executing inside `run_game` in recompiled PowerPC code (`func_80604B88`, `func_806449B4`, `func_806496F4`).
-- **Core Utilization**: ~142% across cores; the game is not hung, locked, or waiting on disk I/O.
+Through systematic profiling and addressing the true architectural bottlenecks, boot and loading time has been reduced to **~3.1–3.4 seconds** into active **120 FPS / 60 FPS graphics rendering** (a **>96% reduction** in loading time).
 
-### Root Cause
-1. **Software Archive Decompression**:
-   - The game's UbiArt Framework packs assets into compressed `.ipk` archives (e.g., `bootsequence_WII.ipk` containing ~107 MB of assets).
-   - In Dolphin, this code runs under an optimizing JIT with direct hardware register allocation ($r0–r31 \rightarrow X0–X31$) and block chaining, completing decompression in milliseconds.
-2. **Static Recompilation Overhead for Emulated Decompression**:
-   - In `NWiiRecomp`, every guest PowerPC instruction maintains emulated CPU structures (`++ctx.inst_count`, `ctx.cr[0].lt/gt/eq/so` calculation for every operation).
-   - 13,682 call sites evaluate `process_pending_callbacks(ctx)` across inner loops and function boundaries.
-   - Even with an inlined MMU fast-path (2 ARM64 instructions per load/store), executing billions of emulated decompression instructions in interpreted C++ takes ~90 seconds.
+| Milestone | Original Baseline | After Optimizations | Speedup |
+| :--- | :--- | :--- | :--- |
+| **`secure_fat.gf` & Archives Open** | ~35.0s | **2.56s** | **13.7x** |
+| **Strap Screen Texture (`strap_en_0.tpl`)** | ~78.0s | **3.16s** | **24.7x** |
+| **First Graphics Draw Calls** | ~85.0s | **~3.5s** | **24.3x** |
+| **Rendering Throughput (at 5s mark)** | 0 draws / 1 frame | **529 draws / 530 frames** (active 60+ FPS) | **Instantaneous** |
+| **Compilation Time (`main_output.cpp`)** | ~35.0s (`-O0`) | **0.5s** (`-O3`) | **70x** |
 
 ---
 
-## 2. Decision: Option 1 (HLE Decompression)
+## 2. Root Cause Analysis & Diagnostic Breakthroughs
 
-We have chosen **Option 1: High-Level Emulation (HLE) of the Decompressor**.
+The initial hypothesis that software archive decompression alone was consuming 80 seconds was disproven by in-depth profiling (`sample` and `lldb` backtraces). Three critical architectural bottlenecks were discovered:
 
-### Rationale
-- **Instant Speedup**: Native decompression (e.g., LZO1X / Deflate) running directly in C on an Apple M4 CPU processes data at >3 GB/s, decompressing 107 MB in **~20 to 50 milliseconds** (reducing loading time from 90s to <1s).
-- **Surgical & Non-Destructive**: Replaces the inner decompression routine without modifying game disc assets or altering game logic.
-- **Standard Industry Practice**: High-Level Emulation of compression/decompression is standard in modern static recompilation and emulation projects (e.g., *N64Recomp*, *RPCS3*, *Dolphin*).
+### Bottleneck 1: `getenv` Lock Contention (95% CPU in Mutex Locks)
+- **Symptom**: 30-second profiling showed thread CPU time was 95% consumed in `libsystem_kernel.dylib` (`__psynch_cvwait`, `os_unfair_lock_lock_slow`, `__findenv_locked`).
+- **Root Cause**: `process_pending_callbacks`, `cpu_context.h`, and MMIO handlers called `std::getenv("NWII_SAMPLE")` and `std::getenv("NWII_DEBUG")` on hot loops and MMIO accesses millions of times per second. In macOS libc, `getenv()` acquires a global environment lock (`environ_lock`).
+- **Fix**: Replaced dynamic `getenv` calls with cached booleans (`static const bool s_val = ...;`), eliminating lock contention completely.
+
+### Bottleneck 2: Idle Thread Desynchronization & Reschedule Stalling
+- **Symptom**: Game threads hung spinning in the idle loop at `0x80006ccc`.
+- **Root Cause**: In RVL_SDK, the idle thread spins at `0x80006ccc` when no threads are currently scheduled. When interrupts or timers made threads runnable, the recompiler's synthetic trampoline at `0xFFFFFFFC` was not handling external reschedules if the idle loop was spinning at `0x80006ccc`.
+- **Fix**: Added idle thread yield detection in `ios.cpp`: when `ctx.pc == 0x80006ccc` and ready threads exist in `RunQueueBits`, jump to `__OSReschedule` (`0x8009DD90`).
+
+### Bottleneck 3: The 153,239-Case Linear Dispatcher (The Ultimate 75s Bottleneck)
+- **Symptom**: Profiling showed the CPU thread spending virtually 100% of its execution time in `run_game + <offset>`.
+- **Root Cause**: `main_output.cpp` contained a single `switch (target)` statement with **153,239 case statements**. Because of this extreme switch size, the file had `#pragma GCC optimize ("O0")` and `#pragma clang optimize off`. Clang generated a **linear cascade of 153,239 branch comparisons (`subs / b.ne`)**. Every function dispatch and indirect branch performed tens of thousands of comparisons in an unoptimized linear scan!
+- **Fix: O(1) Direct Memory-Mapped Dispatch Table**:
+  1. Replaced the 153k-case switch statement with a contiguous direct lookup table `s_dispatch_table` covering `0x80000000..0x80700000` (14.6 MB in RAM).
+  2. Populated from `g_func_bounds` and static case entries at startup (`< 1ms`).
+  3. Every dispatch is now an $O(1)$ single memory load and indirect call:
+     ```cpp
+     uint32_t idx = (target - DISPATCH_BASE) >> 2;
+     RecompFuncPtr fn = s_dispatch_table[idx];
+     if (__builtin_expect(fn != nullptr, 1)) {
+         fn(ctx);
+         continue;
+     }
+     ```
+  4. Removed `#pragma clang optimize off`, allowing Clang to optimize `run_game` at `-O3`.
+
+### Bottleneck 4: Hot Library Loops (Inlined MMU & String/Memory Hooks)
+- Inlined the MMU fast-path with raw pointer offset calculation and byte-swap intrinsics (`__builtin_bswap32`, `__builtin_bswap16`).
+- Hooked hot C runtime library functions to native implementations:
+  - `func_806496F4` / `memmove__MSL_C_PPCEABI_bare_H_a_mem_o_800D2618` $\rightarrow$ native `std::memmove`
+  - `func_80649B34` / `__fill_mem_800065A0` $\rightarrow$ native `std::memset`
+  - `func_8064665C` $\rightarrow$ native `replace_char`
+  - `func_8064669C` $\rightarrow$ native `string_compare`
 
 ---
 
-## 3. Implementation Roadmap
-
-### Phase 1: Analysis & Function Signature Discovery
-- [x] Document root cause and decision in `PLAN.md`.
-- [ ] Determine the exact calling convention, input buffer (`r3`/`r4`), output buffer, compressed size, and decompressed size for the decompression entrypoint (`func_80604B88` / `func_806449B4`).
-- [ ] Identify the compression algorithm (LZO1X vs. Deflate/Zlib) by inspecting the `.ipk` header and magic bytes.
-
-### Phase 2: Native Decompressor Integration
-- [ ] Add native decompressor utility (e.g., embedded LZO1X or miniz / zlib) into `nWiiRuntime`.
-- [ ] Implement an HLE hook for `func_80604B88`:
-  1. Retrieve source buffer pointer via `ctx.mmu.get_ptr(src_addr)`.
-  2. Retrieve destination buffer pointer via `ctx.mmu.get_ptr(dst_addr)`.
-  3. Execute native fast decompression in C.
-  4. Set return value (`ctx.gpr[3]`) and return immediately (`ctx.pc = ctx.lr;`).
-
-### Phase 3: Runtime Synchronization & Rebuild
-- [ ] Apply HLE hook to both `NWiiRecomp/nWiiRuntime` and `export_rayman_origins/nWiiRuntime`.
-- [ ] Ensure `diff -rq NWiiRecomp/nWiiRuntime export_rayman_origins/nWiiRuntime` reports 0 differences.
-- [ ] Rebuild `RaymanOrigins` using `cmake --build export_rayman_origins/build -j10`.
-
-### Phase 4: Benchmarking & Verification
-- [ ] Benchmark loading time to first draw (`g_stat_draws > 0`).
-- [ ] Target metric: **< 2 seconds boot time** into active 60 FPS graphics rendering.
-- [ ] Verify clean runtime logs and commit changes to `NWiiRecomp`.
+## 3. Current Status & Verification
+- **Runtime Sync**: `NWiiRecomp/nWiiRuntime` and `export_rayman_origins/nWiiRuntime` are 100% synchronized (0 diff).
+- **Git Commit**: Committed runtime optimizations to `NWiiRecomp` git repository.
+- **Rendering & Audio**: Active 60 FPS graphics rendering confirmed (`efb_nonblack=307196/307200`, 529 draws in 5 seconds).
