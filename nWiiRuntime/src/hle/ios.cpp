@@ -31,6 +31,13 @@ namespace nwii::runtime {
 
 extern "C" void run_game(nwii::runtime::CPUContext &ctx);
 
+namespace {
+    static const bool s_env_sample_val = (std::getenv("NWII_SAMPLE") != nullptr);
+    static const bool s_env_debug_val = (std::getenv("NWII_DEBUG") != nullptr);
+}
+static inline bool s_env_sample() { return s_env_sample_val; }
+static inline bool s_env_debug() { return s_env_debug_val; }
+
 static uint32_t phys_to_virt(uint32_t addr) {
   if (addr == 0)
     return 0;
@@ -710,7 +717,7 @@ void hle_drive_thread_queue(CPUContext& ctx) {
 
 
 static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
-  if (std::getenv("NWII_SAMPLE")) {
+  if (s_env_sample()) {
       static int n = 0;
       if (n++ < 40)
           std::cout << "[CtxSave] #" << n << " ctx=0x" << std::hex << c
@@ -793,70 +800,33 @@ static bool hle_load_context_from_guest(CPUContext &ctx) {
 int g_trace_after_dec = 0;
 
 bool process_pending_callbacks(CPUContext &ctx) {
-
-  
-  if (std::getenv("NWII_SAMPLE")) {
-      static uint32_t last_ee = 0, edges = 0;
-      uint32_t ee = ctx.msr & 0x8000;
-      if (ee && !last_ee && edges < 8)
-          std::cout << "[EEup] #" << ++edges << " pc=0x" << std::hex << ctx.pc
-                    << " lr=0x" << ctx.lr << std::dec << "\n";
-      last_ee = ee;
-  }
-
-  
-  if (g_trace_after_dec > 0) {
-      static int skip = 20000; 
-      if (skip > 0) { skip--; }
-      else {
-          g_trace_after_dec--;
-          std::cout << "[T] 0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
-                    << " r1=0x" << ctx.gpr[1] << " r3=0x" << ctx.gpr[3]
-                    << " r29=0x" << ctx.gpr[29] << " sr0=0x" << ctx.srr0
-                    << std::dec << "\n";
-      }
-  }
-
-  {
-    static uint32_t trace_pc = []() -> uint32_t {
-      const char *e = std::getenv("NWII_LOOPTRACE");
-      return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0;
-    }();
-    static uint64_t hits = 0;
-    if (trace_pc && ctx.pc == trace_pc) {
-      if ((hits++ % 200000) == 0)
-        std::cout << "[Loop 0x" << std::hex << trace_pc << "] #" << std::dec
-                  << hits << " r3=0x" << std::hex << ctx.gpr[3] << " r4=0x"
-                  << ctx.gpr[4] << " r5=0x" << ctx.gpr[5] << " r30=0x"
-                  << ctx.gpr[30] << " r31=0x" << ctx.gpr[31] << " lr=0x"
-                  << ctx.lr << std::dec << "\n";
+  if (s_env_sample()) {
+    static uint64_t sample_n = 0;
+    if ((++sample_n % 20000) == 0) {
+      std::cout << "[Sample] pc=0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
+                << " r3=0x" << ctx.gpr[3] << " r1=0x" << ctx.gpr[1] << std::dec << "\n";
     }
   }
 
-  {
-    static bool sample = std::getenv("NWII_SAMPLE") != nullptr;
-    static uint64_t n = 0;
-    if (sample && (++n % 400000) == 0)
-      std::cout << "[Sample] pc=0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
-                << " r3=0x" << ctx.gpr[3] << std::dec << "\n";
+  // SOJE41 idle thread spins at 0x80006ccc. If any higher-priority thread is ready
+  // (RunQueueBits has non-idle threads ready), flag a reschedule request.
+  if (ctx.pc == 0x80006ccc && ctx.gpr[13] >= 0x80000000u) {
+    uint32_t runq = ctx.mmu.read32(ctx.gpr[13] - 24944);
+    if (runq & ~1u) {
+      ctx.ext_resched_pending = true;
+    }
   }
 
-  
+  static uint32_t g_resched_addr = []() -> uint32_t {
+    const char *e = std::getenv("NWII_RESCHED");
+    if (e) return (uint32_t)std::strtoul(e, nullptr, 16);
+    return 0x8009DD90; // Default for SOJE41 __OSReschedule
+  }();
 
-  
-  if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
-
-    
-
-    
-    
-    static uint32_t g_resched_addr = []() -> uint32_t {
-      const char *e = std::getenv("NWII_RESCHED");
-      return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0;
-    }();
-    if (ctx.ext_resched_pending && g_resched_addr) {
+  if (ctx.ext_resched_pending && g_resched_addr && !ctx.in_callback) {
+    if (ctx.pc == 0xFFFFFFFC || ctx.pc == 0x80006ccc || ctx.pc == 0) {
       ctx.ext_resched_pending = false;
-      if (std::getenv("NWII_SAMPLE")) {
+      if (s_env_sample()) {
         static int n = 0;
         if (n++ < 12) {
           uint32_t cur = ctx.mmu.read32(0x800000E4);
@@ -870,6 +840,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.pc = g_resched_addr;
       return true;
     }
+  }
+
+  if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
     ctx.ext_resched_pending = false;
     if (ctx.dispatch_saved_ctx) {
       uint32_t current_thread = ctx.mmu.read32(0x800000E4);
@@ -881,21 +854,34 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.dispatch_saved_ctx = 0;
     }
     if (hle_load_context_from_guest(ctx)) {
-
-      
-
-      
       ctx.dec_written_tb = ctx.read_timebase();
       static uint32_t restore_count = 0;
       restore_count++;
       if (ctx.pc == 0 || (restore_count % 64) == 1) {
-          if (std::getenv("NWII_DEBUG")) std::cout << "[HLE PI] Context restore #" << std::dec << restore_count
+          if (s_env_debug()) std::cout << "[HLE PI] Context restore #" << std::dec << restore_count
                     << " pc=0x" << std::hex << ctx.pc << " r1=0x" << ctx.gpr[1]
                     << " msr=0x" << ctx.msr << std::dec << "\n";
       }
       return true;
     }
   }
+
+  // Fast path: if not at a thread context switch (0xFFFFFFFC) or idle (0 or 0x80006ccc),
+  // throttle hardware polling and interrupt scanning to periodic intervals.
+  if (ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc && ctx.pc != 0) {
+    static thread_local uint64_t last_poll_inst = 0;
+    if ((ctx.inst_count - last_poll_inst) < 2048) {
+      bool dec_is_due = ctx.dec_irq_pending && ((ctx.read_timebase() - ctx.dec_written_tb) >= ctx.dec_value);
+      if (!dec_is_due && !ctx.vblank_pending &&
+          (nwii::runtime::hw::pi_intsr.load(std::memory_order_relaxed) == 0) &&
+          (ctx.pending_cb_count.load(std::memory_order_relaxed) == 0)) {
+        return false;
+      }
+    }
+    last_poll_inst = ctx.inst_count;
+  }
+
+
 
   if ((ctx.inst_count % 20000000) == 0) {
       std::cout << "[Heartbeat] PC: 0x" << std::hex << ctx.pc << " LR: 0x" << ctx.lr
@@ -991,7 +977,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
       g_ipc_interrupt_delay--;
       if (g_ipc_interrupt_delay == 0) {
           nwii::runtime::hw::trigger_pi_interrupt(0x00000010);
-          if (std::getenv("NWII_SAMPLE"))
+          if (s_env_sample())
               std::cout << "[IPC] irq raised intmr=0x" << std::hex
                         << nwii::runtime::hw::pi_intmr << " msr=0x" << ctx.msr
                         << " pc=0x" << ctx.pc << std::dec << "\n";
@@ -1014,7 +1000,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if (ctx.in_callback) {
-    if (std::getenv("NWII_SAMPLE") && (nwii::runtime::hw::pi_intsr & 0x00000010)) {
+    if (s_env_sample() && (nwii::runtime::hw::pi_intsr & 0x00000010)) {
         static uint64_t n = 0;
         if ((n++ % 100000) == 0)
             std::cout << "[IPC] irq pending but in_callback pc=0x" << std::hex
@@ -1065,7 +1051,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   
   if (ctx.dec_expired() && (ctx.msr & 0x8000) && !ctx.in_callback) {
       ctx.dec_irq_pending = false; 
-      if (std::getenv("NWII_SAMPLE")) {
+      if (s_env_sample()) {
           static uint32_t df = 0;
           if (df++ < 12)
               std::cout << "[DECfire] #" << df << " pc=0x" << std::hex << ctx.pc
@@ -1138,7 +1124,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
               
 
               if (wq >= 0x80000000u && wq < 0x81800000u &&
-                  std::getenv("NWII_SAMPLE")) {
+                  s_env_sample()) {
                   std::cout << "    wq[-2..5]:" << std::hex;
                   for (int i = -2; i < 6; ++i)
                       std::cout << " " << ctx.mmu.read32(wq + i * 4);
@@ -1218,7 +1204,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
       if (use_new_path && (handler_in_flight || (!idle && sched_disabled))) {
           
-          if (std::getenv("NWII_SAMPLE")) {
+          if (s_env_sample()) {
               static uint64_t defer_count = 0;
               if ((++defer_count % 500000) == 0)
                   std::cout << "[HLE PI] int deferred: sched_disabled="
@@ -1285,7 +1271,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
               ctx.lr = 0xFFFFFFFC;
               ctx.pc = s_dispatch_addr;
 
-              if (std::getenv("NWII_SAMPLE")) {
+              if (s_env_sample()) {
                   static uint32_t dc = 0;
                   if ((dc++ % 1000) == 0)
                       std::cout << "[HLE PI] -> __OSDispatchInterrupt #" << std::dec
@@ -1318,7 +1304,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                   uint32_t handler = ctx.mmu.read32(0x80003040 + os_intr * 4);
 
                   if (handler != 0 && handler != 0xFFFFFFFF) {
-                      if (std::getenv("NWII_SAMPLE") && (os_intr == 24 || os_intr == 17)) {
+                      if (s_env_sample() && (os_intr == 24 || os_intr == 17)) {
                           static int vn = 0, cpn = 0;
                           if (os_intr == 24 && vn++ < 5)
                               std::cout << "[VIdisp] #" << vn << " handler=0x"
@@ -1332,13 +1318,13 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       
                       static uint32_t vi_dispatch_count = 0;
                       if (os_intr != 24 && (vi_dispatch_count++ % 256) == 0) {
-                          if (std::getenv("NWII_DEBUG")) std::cout << "[HLE PI] Dispatching interrupt "
+                          if (s_env_debug()) std::cout << "[HLE PI] Dispatching interrupt "
                                     << std::dec << os_intr << " to handler 0x"
                                     << std::hex << handler << " r1=0x"
                                     << ctx.gpr[1] << " pc=0x" << ctx.pc
                                     << std::dec << std::endl;
                       }
-                      if (std::getenv("NWII_SAMPLE")) {
+                      if (s_env_sample()) {
                           static uint64_t census[32] = {0};
                           static uint64_t total = 0;
                           if (os_intr >= 0 && os_intr < 32) census[os_intr]++;
@@ -1359,7 +1345,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                           current_ctx = ctx.mmu.read32(0x800000E4);
                       }
                       if (current_ctx == 0) {
-                          if (std::getenv("NWII_SAMPLE")) {
+                          if (s_env_sample()) {
                               static int n = 0;
                               if (n++ < 4)
                                   std::cout << "[HLE PI] int " << std::dec
@@ -1410,13 +1396,14 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       ctx.pc = handler;
                       longjmp(ctx.exception_jmp_buf, 1);
                   } else {
-                      
-                      static int null_warn_count = 0;
-                       if (null_warn_count++ < 3)
-                          std::cout << "[HLE PI] Handler for interrupt "
-                                    << std::dec << os_intr
-                                    << " is NULL (OS reinit in progress, deferring)."
-                                    << std::endl;
+                      if (s_env_debug()) {
+                          static int null_warn_count = 0;
+                          if (null_warn_count++ < 3)
+                              std::cout << "[HLE PI] Handler for interrupt "
+                                        << std::dec << os_intr
+                                        << " is NULL (OS reinit in progress, deferring)."
+                                        << std::endl;
+                      }
                   }
               }
           } 
@@ -1441,7 +1428,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
     ctx.pending_cb_count.fetch_sub(1, std::memory_order_relaxed);
   }
 
-  if (std::getenv("NWII_SAMPLE")) {
+  if (s_env_sample()) {
     std::cout << "[HLE Callback] Dispatching cb=0x" << std::hex << cb.cb_addr
               << " arg1=0x" << cb.arg1 << " arg2=0x" << cb.arg2 << " from PC=0x"
               << ctx.pc << " LR=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]

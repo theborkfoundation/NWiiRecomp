@@ -28,7 +28,8 @@ static void vi_update_interrupt() {
 }
 
 void vi_trigger_interrupt() {
-    if (std::getenv("NWII_VITRACE")) {
+    static const bool s_vitrace = (std::getenv("NWII_VITRACE") != nullptr);
+    if (s_vitrace) {
         static int n = 0;
         if (n++ < 40) std::cout << "[VItrig] #" << std::dec << n << "\n";
     }

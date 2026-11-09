@@ -514,7 +514,8 @@ struct CPUContext {
   bool dec_irq_pending = false;
 
   void write_dec(uint32_t v) {
-    if (std::getenv("NWII_SAMPLE")) {
+    static const bool s_sample = std::getenv("NWII_SAMPLE") != nullptr;
+    if (s_sample) {
       static uint64_t n = 0;
       ++n;
       if (n <= 10 || (n % 500) == 0)

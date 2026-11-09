@@ -147,7 +147,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                 
                 dsp_control &= ~0x0080;
                 dsp_update_pi();
-                if (std::getenv("NWII_DSPTRACE"))
+                if (([](){ static const bool s = (std::getenv("NWII_DSPTRACE") != nullptr); return s; })())
                     std::cout << "[DSPm] mail read lo=0x" << std::hex << val
                               << " (hi was 0x" << (dsp_mbox_dsp_hi | 0x8000)
                               << ") csr=0x" << dsp_control << std::dec << "\n";
@@ -173,7 +173,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             return 0;
         },
         [](uint32_t addr, uint32_t val) {
-            static const bool artrace = std::getenv("NWII_ARTRACE") != nullptr;
+            static const bool artrace = ([](){ static const bool s = (std::getenv("NWII_ARTRACE") != nullptr); return s; })();
             if (artrace && (addr & 0xFFF0) >= 0x5010 && (addr & 0xFFF0) < 0x5030)
                 std::cout << "[ARw] 0x" << std::hex << (addr & 0xFFFF)
                           << " = 0x" << val << std::dec << "\n";
@@ -222,7 +222,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                         reply(0x0000);
                     }
                 }
-                if (std::getenv("NWII_DSPTRACE"))
+                if (([](){ static const bool s = (std::getenv("NWII_DSPTRACE") != nullptr); return s; })())
                     std::cout << "[DSPm] cpu mail write @" << std::hex
                               << (addr & 0xFFFF) << " val=0x" << val
                               << " csr=0x" << dsp_control << std::dec << "\n";
@@ -230,7 +230,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                 if (val & 0x8000) dsp_mbox_dsp_hi &= ~0x8000;
             } else if (addr == 0xCC005008 || addr == 0xCC00500A) {
                 uint16_t val16 = val & 0xFFFF;
-                if (std::getenv("NWII_DSPTRACE"))
+                if (([](){ static const bool s = (std::getenv("NWII_DSPTRACE") != nullptr); return s; })())
                     std::cout << "[DSPm] csr write val=0x" << std::hex
                               << (val & 0xFFFF) << " csr=0x" << dsp_control
                               << std::dec << "\n";
@@ -299,7 +299,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             return (uint16_t)MMIODispatcher::get().read32(addr);
         },
         [](uint32_t addr, uint16_t val) {
-            static const bool artrace = std::getenv("NWII_ARTRACE") != nullptr;
+            static const bool artrace = ([](){ static const bool s = (std::getenv("NWII_ARTRACE") != nullptr); return s; })();
             if (artrace && (addr & 0xFFFF) >= 0x5020 && (addr & 0xFFFF) < 0x5030)
                 std::cout << "[ARw16] 0x" << std::hex << (addr & 0xFFFF)
                           << " = 0x" << val << std::dec << "\n";

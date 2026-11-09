@@ -84,7 +84,7 @@ void register_ipc(MMIODispatcher& dispatcher) {{
                         
                         result = ipc_dispatch_request(*g_ctx_ptr, ipc_ppc_msg);
                     }
-                    if (std::getenv("NWII_DEBUG")) std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
+                    if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
                     if (result != -0x70000001) { 
                         
                         ipc_ppc_ctrl &= ~0x01;
@@ -111,7 +111,7 @@ void register_ipc(MMIODispatcher& dispatcher) {{
             case 0x00000C: {
                 ipc_arm_ctrl &= ~(val & 0x03);
                 if (!(ipc_arm_ctrl & 3)) {
-                    if (std::getenv("NWII_SAMPLE") && (pi_intsr & 0x10)) {
+                    if (([](){ static const bool s = (std::getenv("NWII_SAMPLE") != nullptr); return s; })() && (pi_intsr & 0x10)) {
                         static int n = 0;
                         if (n++ < 6)
                             std::cout << "[IPC] armctrl write 0x" << std::hex

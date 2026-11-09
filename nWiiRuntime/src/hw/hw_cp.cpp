@@ -77,8 +77,8 @@ void cp_process_fifo() {
         g_cp_sr |= 0x0E;
     }
 
-    if (count > 0 && std::getenv("NWII_CPTRACE"))
-        if (std::getenv("NWII_DEBUG")) std::cout << "[CPFIFO] drained " << std::dec << count << " bytes rp=0x"
+    if (count > 0 && ([](){ static const bool s = (std::getenv("NWII_CPTRACE") != nullptr); return s; })())
+        if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CPFIFO] drained " << std::dec << count << " bytes rp=0x"
                   << std::hex << rp0 << "->0x" << rp << " wp=0x" << wp
                   << " base=0x" << base << " end=0x" << end << std::dec << "\n";
 }
@@ -111,7 +111,7 @@ void register_cp(MMIODispatcher &dispatcher) {
         // write32
         [](uint32_t addr, uint32_t val) {
             if (cp_debug_count++ < 100)
-                if (std::getenv("NWII_DEBUG")) std::cout << "[CP] write32 addr=" << std::hex << addr << " val=" << val << "\n";
+                if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CP] write32 addr=" << std::hex << addr << " val=" << val << "\n";
             if (addr == 0xCC000000) {
                 g_cp_sr = (uint16_t)(val >> 16);
                 g_cp_cr = (uint16_t)val;
@@ -185,7 +185,7 @@ void register_cp(MMIODispatcher &dispatcher) {
         // write16
         [](uint32_t addr, uint16_t val) {
             if (cp_debug_count++ < 100)
-                if (std::getenv("NWII_DEBUG")) std::cout << "[CP] write16 addr=" << std::hex << addr << " val=" << val << "\n";
+                if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CP] write16 addr=" << std::hex << addr << " val=" << val << "\n";
             if (addr == 0xCC000000) { g_cp_sr = val; }
             else if (addr == 0xCC000002) {
                 g_cp_cr = val;

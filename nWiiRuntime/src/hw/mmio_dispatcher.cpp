@@ -31,7 +31,7 @@ uint32_t MMIODispatcher::read32(uint32_t addr) {
             }
         }
     }
-    if (std::getenv("NWII_DEBUG")) std::cout << "[MMIO] Unhandled read32 at 0x" << std::hex << addr << std::dec << std::endl;
+    if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[MMIO] Unhandled read32 at 0x" << std::hex << addr << std::dec << std::endl;
     return 0;
 }
 
@@ -54,7 +54,7 @@ void MMIODispatcher::write32(uint32_t addr, uint32_t val) {
             }
         }
     }
-    if (std::getenv("NWII_DEBUG")) std::cout << "[MMIO] Unhandled write32 at 0x" << std::hex << addr << " val=0x" << val << std::dec << std::endl;
+    if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[MMIO] Unhandled write32 at 0x" << std::hex << addr << " val=0x" << val << std::dec << std::endl;
 }
 
 uint16_t MMIODispatcher::read16(uint32_t addr) {
@@ -75,7 +75,7 @@ uint16_t MMIODispatcher::read16(uint32_t addr) {
             }
         }
     }
-    if (std::getenv("NWII_DEBUG")) std::cout << "[MMIO] Unhandled read16 at 0x" << std::hex << addr << std::dec << std::endl;
+    if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[MMIO] Unhandled read16 at 0x" << std::hex << addr << std::dec << std::endl;
     return 0;
 }
 
@@ -97,7 +97,7 @@ void MMIODispatcher::write16(uint32_t addr, uint16_t val) {
             }
         }
     }
-    if (std::getenv("NWII_DEBUG")) std::cout << "[MMIO] Unhandled write16 at 0x" << std::hex << addr << " val=0x" << val << std::dec << std::endl;
+    if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[MMIO] Unhandled write16 at 0x" << std::hex << addr << " val=0x" << val << std::dec << std::endl;
 }
 
 void MMIODispatcher::clear() {

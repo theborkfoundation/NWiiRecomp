@@ -44,10 +44,10 @@ void register_pe(MMIODispatcher &dispatcher) {
         [](uint32_t addr, uint32_t val) {
             if (addr == 0xCC00100A || addr == 0xCC001008) {
                 uint32_t v = (addr == 0xCC001008 && val > 0xFFFF) ? (val & 0xFFFF) : val;
-                if (std::getenv("NWII_SAMPLE")) {
+                if (([](){ static const bool s = (std::getenv("NWII_SAMPLE") != nullptr); return s; })()) {
                     static int n = 0;
                     if (n++ < 12)
-                        if (std::getenv("NWII_DEBUG")) std::cout << "[PE] ctrl write @" << std::hex << addr
+                        if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[PE] ctrl write @" << std::hex << addr
                                   << " val=0x" << val << std::dec << "\n";
                 }
                 if (v & 0x04) g_pe_token_pending = false;
@@ -76,7 +76,7 @@ void register_pe(MMIODispatcher &dispatcher) {
 void pe_signal_token(uint32_t token, bool raise_interrupt) {
     static int n = 0;
     if (n++ < 6)
-        if (std::getenv("NWII_DEBUG")) std::cout << "[PE] token 0x" << std::hex << token << (raise_interrupt ? " +int" : "") << std::dec << "\n";
+        if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[PE] token 0x" << std::hex << token << (raise_interrupt ? " +int" : "") << std::dec << "\n";
     g_pe_token = token;
     if (raise_interrupt) {
         g_pe_token_pending = true;
@@ -87,7 +87,7 @@ void pe_signal_token(uint32_t token, bool raise_interrupt) {
 void pe_signal_finish() {
     static int n = 0;
     if (n++ < 6)
-        if (std::getenv("NWII_DEBUG")) std::cout << "[PE] finish\n";
+        if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[PE] finish\n";
     g_pe_finish_pending = true;
     pe_update_interrupts();
 }

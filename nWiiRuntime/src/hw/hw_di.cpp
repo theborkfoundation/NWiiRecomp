@@ -189,7 +189,7 @@ void register_di(MMIODispatcher& dispatcher) {
         },
         [](uint32_t addr, uint32_t val) {
             if (addr == 0xCC006000) {
-                if (std::getenv("NWII_SAMPLE")) std::cout << "[HW DI] Write to di_sr: 0x" << std::hex << val << std::dec << "\n";
+                if (([](){ static const bool s = (std::getenv("NWII_SAMPLE") != nullptr); return s; })()) std::cout << "[HW DI] Write to di_sr: 0x" << std::hex << val << std::dec << "\n";
                 
                 uint32_t w1c = val & (SR_BRK | SR_DEINT | SR_TCINT);
                 uint32_t masks = SR_DEINTMASK | SR_TCINTMASK | SR_BRKINTMASK;
