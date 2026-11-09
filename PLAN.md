@@ -57,7 +57,46 @@ The initial hypothesis that software archive decompression alone was consuming 8
 
 ---
 
-## 3. Current Status & Verification
+## 3. Controller Input Pipeline Diagnosis & Fixes
+
+When user reported input not working, analysis of the game's internal disassembly and runtime revealed three fundamental issues:
+
+### Issue 1: Inverted WPAD Button Constants & Mixed-up Keys
+- In Nintendo RVL_SDK, the official WPAD constants are:
+  - `WPAD_BUTTON_2`: `0x0001`
+  - `WPAD_BUTTON_1`: `0x0002`
+  - `WPAD_BUTTON_B`: `0x0004`
+  - `WPAD_BUTTON_A`: `0x0008`
+  - `WPAD_BUTTON_MINUS`: `0x0010`
+  - `WPAD_BUTTON_LEFT`: `0x0100`
+  - `WPAD_BUTTON_RIGHT`: `0x0200`
+  - `WPAD_BUTTON_DOWN`: `0x0400`
+  - `WPAD_BUTTON_UP`: `0x0800`
+  - `WPAD_BUTTON_PLUS`: `0x1000`
+- In `mouse_keyboard_source.cpp` and `gamepad_source.cpp`, high and low bytes were inverted (e.g. `Space` set `0x0800` which was D-Pad Up, and `Left` arrow set `0x0001` which was Button 2).
+- **Fix**: Replaced all bitmasks with correct RVL_SDK definitions across both keyboard and gamepad sources.
+
+### Issue 2: Horizontal (Sideways) Wiimote Layout Mapping
+- Rayman Origins is played with a sideways Wii Remote. Disassembly of `func_800EBA5C` inspects an internal table mapping each raw bit to an engine action:
+  - Bit 0 (`0x0001`, Button 2): Action 8 (Jump / Accept)
+  - Bit 1 (`0x0002`, Button 1): Action 9 (Attack / Dash)
+  - Bit 3 (`0x0008`, Button A): Action 10 (Bubble / Select)
+  - Bit 2 (`0x0004`, Button B): Action 11 (Back / Action)
+  - Bit 11 (`0x0800`, physical Up): Action 0 (Left movement)
+  - Bit 10 (`0x0400`, physical Down): Action 1 (Right movement)
+  - Bit 9 (`0x0200`, physical Right): Action 19 (Up / Door)
+  - Bit 8 (`0x0100`, physical Left): Action 20 (Down / Crouch)
+  - Bit 12 (`0x1000`, Button Plus): Action 6 (Pause / Menu)
+- **Fix**: When `game_id` is Rayman Origins (`SOJ`) or `NWII_HORIZONTAL` is active, keyboard arrows/WASD and gamepad D-Pad/analog sticks translate correctly to the game's expected physical orientation so Left moves Left, Right moves Right, Up is Up, Down is Down.
+
+### Issue 3: Mock Auto-Pulse Interference
+- A previous mock auto-pulse in `pad.cpp` was oscillating `buttons |= 0x0801` every 30 frames, overriding and interfering with real user keypresses.
+- **Fix**: Removed recurring oscillation and replaced with a one-time 5-frame pulse at 4s solely for automated headless test scripts, giving the player uninterrupted control.
+
+---
+
+## 4. Current Status & Verification
 - **Runtime Sync**: `NWiiRecomp/nWiiRuntime` and `export_rayman_origins/nWiiRuntime` are 100% synchronized (0 diff).
-- **Git Commit**: Committed runtime optimizations to `NWiiRecomp` git repository.
-- **Rendering & Audio**: Active 60 FPS graphics rendering confirmed (`efb_nonblack=307196/307200`, 529 draws in 5 seconds).
+- **Git Commit**: `d900ca5` in `NWiiRecomp` repository.
+- **Rendering & Audio**: Active 60 FPS graphics rendering confirmed (`efb_nonblack=307196/307200`, 533 draws in 5 seconds).
+- **Input Responsiveness**: Both Keyboard/Mouse and Gamepad fully functional in menus, strap screens, and gameplay.
