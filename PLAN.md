@@ -323,3 +323,45 @@ counter unreadable.
 
 Draws keep accumulating instead of freezing, but the picture is still wrong
 (white/black), so frame interpretation is better, not correct.
+
+---
+
+## 8. Why the menu phase was uniformly white
+
+`NWII_FLATCOLOR=1` (forces `FragColor = red`) turns the whole screen red, so the
+draws do cover the framebuffer -- the white was the shading result, not a clear
+or a missing present. The present path is a plain EFB blit (`xfb_present` is
+opt-in via `NWII_XFB` and was off).
+
+### Textures were bound once per batch
+
+The engine merges consecutive draws that share a primitive type into one batch.
+`renderer_gl.cpp` bound textures only when a batch was opened, so every later
+draw in the same batch sampled the *first* draw's texture. With a white mask
+texture bound first, the whole screen came out white.
+
+The bind now happens before every draw. It is not cached: the present/blit path
+and the EFB lookup bind textures directly on unit 0, so a cached id goes stale
+and the draw samples whatever the presenter left behind (that regression was
+caught by the strap screen going white).
+
+`NWII_NOTEX=1` leaves every unit on texture 0 (samples black) and is the clean way
+to tell "white because of the texture" from any other cause: with it, the menu
+phase renders a dark blue background plus a gradient quad, i.e. the geometry and
+transforms are right.
+
+### What the textures actually contain
+
+`NWII_CMPRDBG=1` prints the compressed input of the first block of each CMPR
+texture. Most menu textures decode to real content (masks, silhouettes), but
+several 512x512 ones are flat fills -- e.g. `1065E080` is `c0=0000 c1=FFFF
+idx=55555555` in every block, i.e. uniform white, and `105A40E0` is uniform dark
+red. They also appear in pairs, one with real data and one all-zero at a nearby
+address.
+
+So part of the white is genuine flat-fill texture data being drawn full-screen.
+After the binding fix, the menu phase shows the *strap overlay* texture instead
+of a white quad -- more correct, still not the menu, which points at the game's
+state machine rather than the renderer: the boot sequence loops strap -> menu
+attempt -> strap, consistent with the menu background being a video that fails to
+open.

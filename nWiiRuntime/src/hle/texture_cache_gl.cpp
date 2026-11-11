@@ -432,7 +432,7 @@ void TextureCache::decode_paletted(CPUContext& ctx, const gx::TexStage& stage, C
 
 void TextureCache::decode_cmpr(CPUContext& ctx, uint32_t addr, uint32_t width, uint32_t height, Color* out) {
 
-    
+
     uint32_t tiles_x = (width + 7) / 8;
     for (uint32_t y = 0; y < height; y+=8) {
         for (uint32_t x = 0; x < width; x+=8) {
@@ -446,6 +446,22 @@ void TextureCache::decode_cmpr(CPUContext& ctx, uint32_t addr, uint32_t width, u
                     uint16_t c0 = ctx.mmu.read16(addr + block_offset);
                     uint16_t c1 = ctx.mmu.read16(addr + block_offset + 2);
                     uint32_t indices = ctx.mmu.read32(addr + block_offset + 4);
+
+                    // NWII_CMPRDBG: CMPR output is white when every block decodes
+                    // to 0xFFFF endpoints, so show the compressed input for the
+                    // first few blocks to tell "asset is white" apart from
+                    // "decoder is wrong".
+                    static const bool cmprdbg =
+                        std::getenv("NWII_CMPRDBG") != nullptr;
+                    if (cmprdbg) {
+                        static int shown = 0;
+                        if (shown < 200 && x == 0 && y == 0) {
+                            printf("[CMPR] %08X wh=%ux%u block(%d,%d) c0=%04X c1=%04X "
+                                   "idx=%08X\n",
+                                   addr, width, height, bx, by, c0, c1, indices);
+                            ++shown;
+                        }
+                    }
 
                     Color pal[4];
                     pal[0] = unpack_rgb565(c0);

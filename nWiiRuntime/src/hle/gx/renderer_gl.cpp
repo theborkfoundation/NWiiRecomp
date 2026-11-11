@@ -801,15 +801,28 @@ public:
         }
       } else if (cmd.type == GXCommandType::DrawPrimitive) {
 
-        if (!s_batch_open && g_ctx_ptr) {
+        if (g_ctx_ptr) {
+          // Bind on every draw, not once per batch. The engine merges consecutive
+          // draws that share a primitive type into one batch, so binding at batch
+          // start made every later draw sample the first draw's texture -- which
+          // is how a white mask texture ended up covering the whole menu.
+          // NWII_NOTEX leaves every unit on texture 0 (samples black), which
+          // separates "white because of the texture" from other causes.
+          static const bool no_tex = std::getenv("NWII_NOTEX") != nullptr;
+          // No "already bound" cache: the present/blit path and the EFB lookup
+          // bind textures directly on unit 0, so a cached id goes stale and the
+          // draw samples whatever the last presenter bound. Eight binds per draw
+          // is cheaper than getting that wrong.
           for (int i = 0; i < 8; ++i) {
+            GLuint want = 0;
             const auto &stage = g_state.texStages[i];
-            if (stage.base_addr != 0 && stage.width > 0 && stage.height > 0) {
-              GLuint tex = nwii::runtime::hle::TextureCache::get().get_texture(
+            if (!no_tex && stage.base_addr != 0 && stage.width > 0 &&
+                stage.height > 0) {
+              want = nwii::runtime::hle::TextureCache::get().get_texture(
                   *g_ctx_ptr, stage);
-              glActiveTexture(GL_TEXTURE0 + i);
-              glBindTexture(GL_TEXTURE_2D, tex);
             }
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, want);
           }
         }
         DrawPrimitive(cmd);
