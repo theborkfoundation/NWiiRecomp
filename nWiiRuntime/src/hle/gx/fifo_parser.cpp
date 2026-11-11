@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <algorithm>
+#include <cmath>
 
 namespace nwii::runtime {
     extern MMU* g_mmu;
@@ -36,10 +37,21 @@ const int kSlotBadCont = NWII_DIAG_SLOT("fifo.bad_continuation", diag::Kind::Err
 const int kSlotUnknown = NWII_DIAG_SLOT("fifo.unknown_opcode", diag::Kind::Warn);
 const int kSlotResync = NWII_DIAG_SLOT("fifo.resync_bytes", diag::Kind::Error);
 const int kSlotVsizeFix = NWII_DIAG_SLOT("fifo.vsize_repaired", diag::Kind::Warn);
+// A block of vertex data with no draw header in front of it. The CP cannot
+// consume that, so the block is dropped; counting it separates "this title
+// streams vertices without a header" from "our framing is off" -- the two
+// produce the same downstream garbage.
+const int kSlotHeaderless =
+    NWII_DIAG_SLOT("fifo.headerless_vertices", diag::Kind::Error);
 
 } // namespace
 
 extern GXState g_state;
+
+// VAT index of the most recent well-formed draw. A headerless vertex block
+// almost always belongs to the pass that draw started, so this is the best
+// guess at the format to decode it with.
+static int g_last_draw_vat = 0;
 
 // NWII_SKINDBG state (declared early so ParseCP/ParseBP in the anonymous
 // namespace can reference it).
@@ -1025,6 +1037,118 @@ static size_t RepairVertexSize(const std::vector<uint8_t>& f, size_t offset,
     return best;
 }
 
+// Vertex layout for a given byte stride, for the headerless-block recovery.
+// Only the layouts this title actually emits are built; anything else is
+// rejected so the recovery cannot invent geometry of the wrong shape.
+static bool BuildVatForStride(size_t stride, VATSlot &out) {
+    std::memset(&out, 0, sizeof(out));
+    switch (stride) {
+    case 24: // pos f32 XYZ + colour RGBA8 + texcoord f32 ST
+        out.posMask = VtxAttrMask::Direct;
+        out.posType = VtxAttrType::F32;
+        out.posElements = true;
+        out.clrMask[0] = VtxAttrMask::Direct;
+        out.clrType[0] = (VtxAttrType)5; // RGBA8
+        out.texMask[0] = VtxAttrMask::Direct;
+        out.texType[0] = VtxAttrType::F32;
+        out.texElements[0] = true;
+        break;
+    case 16: // pos f32 XYZ + colour RGBA8
+        out.posMask = VtxAttrMask::Direct;
+        out.posType = VtxAttrType::F32;
+        out.posElements = true;
+        out.clrMask[0] = VtxAttrMask::Direct;
+        out.clrType[0] = (VtxAttrType)5; // RGBA8
+        break;
+    case 12: // pos f32 XYZ
+        out.posMask = VtxAttrMask::Direct;
+        out.posType = VtxAttrType::F32;
+        out.posElements = true;
+        break;
+    default:
+        return false;
+    }
+    return VertexSize(out) == stride;
+}
+
+// A run of vertices that has no draw header. Such a block is self-describing:
+// it is a whole number of vertices at some stride, and it ends exactly where a
+// burst of state writes resumes (float data can fake one command opcode, not a
+// chain of BP/XF writes). Returns the number of bytes in the block, or 0.
+//
+// This matters because the parser otherwise skips one byte into the float data,
+// reads a mantissa byte as a draw opcode, and loses the rest of the frame -- a
+// cascade that looks like thousands of unrelated desyncs.
+// Score how well a candidate stride decodes as vertex data. A wrong stride
+// misaligns the position triple onto other attributes, which is exactly how
+// colour words (0xFFFFFFFF) end up read as floats -- so count the position
+// components that are not finite numbers. The right stride has almost none.
+static int ScoreVertexStride(const std::vector<uint8_t> &f, size_t offset,
+                             size_t stride, size_t count) {
+    int bad = 0;
+    size_t n = std::min(count, (size_t)32);
+    for (size_t i = 0; i < n; i++) {
+        size_t v = offset + i * stride;
+        for (int c = 0; c < 3; ++c) {
+            size_t p = v + (size_t)c * 4;
+            if (p + 4 > f.size()) { ++bad; continue; }
+            uint32_t u = ((uint32_t)f[p] << 24) | ((uint32_t)f[p + 1] << 16) |
+                         ((uint32_t)f[p + 2] << 8) | f[p + 3];
+            float x;
+            std::memcpy(&x, &u, 4);
+            if (!std::isfinite(x) || x > 1e6f || x < -1e6f) ++bad;
+        }
+    }
+    return bad;
+}
+
+static size_t MatchVertexBlock(const std::vector<uint8_t> &f, size_t offset,
+                              size_t preferred, size_t *stride_out,
+                              size_t *count_out) {
+    // Candidate strides, most likely first. Every candidate that finds a valid
+    // end is then scored on whether it decodes as numbers, because the boundary
+    // alone cannot tell a 24-byte vertex from a 16-byte one when both divide the
+    // same block length.
+    const size_t cand[] = {24, 16, 12, 20, 32, 28, 36,
+                           40, preferred, 8, 6, 44, 48, 56, 64};
+    const size_t max_len = std::min(f.size() - offset, (size_t)(1u << 20));
+    size_t best_len = 0, best_stride = 0, best_count = 0;
+    int best_bad = 0x7FFFFFFF;
+    for (size_t vs : cand) {
+        if (vs < 4 || vs > 64) continue;
+        // Walk vertex counts upward and stop at the first end that is followed by
+        // real state writes. The engine pads a finished batch with NOPs, so zeros
+        // between the vertices and the next command are expected.
+        size_t found_k = 0;
+        for (size_t k = 3; k * vs <= max_len; ++k) {
+            size_t q = offset + k * vs;
+            size_t r = q;
+            while (r < f.size() && (f[r] == 0x00 || f[r] == 0x44 || f[r] == 0x48)) ++r;
+            if (r + 1 >= f.size() || !IsStateOpcode(f[r])) continue;
+            size_t s1 = CommandSizeAt(f, r);
+            if (!s1 || r + s1 >= f.size() || !IsStateOpcode(f[r + s1])) continue;
+            found_k = k;
+            break;
+        }
+        if (!found_k) continue;
+        size_t len = found_k * vs;
+        if (len < 3 * vs) continue;
+        int bad = ScoreVertexStride(f, offset, vs, found_k);
+        // Fewest misdecoded positions wins; on a tie the longer block wins (a
+        // wrong stride usually truncates), then the earlier candidate.
+        if (bad < best_bad || (bad == best_bad && len > best_len)) {
+            best_bad = bad;
+            best_len = len;
+            best_stride = vs;
+            best_count = found_k;
+        }
+    }
+    if (!best_stride) return 0;
+    if (stride_out) *stride_out = best_stride;
+    if (count_out) *count_out = best_count;
+    return best_len;
+}
+
 static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::vector<GXCommand>& commands, int depth) {
     const size_t fifo_size = fifo.size();
 
@@ -1349,6 +1473,7 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             }
 
             VATSlot& vat = g_state.vat[vat_idx];
+            g_last_draw_vat = vat_idx;
 
             // Vertex size is constant for a draw (every attribute is either
             // direct with a fixed byte width or a fixed 1/2-byte index), so
@@ -1849,9 +1974,66 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
                     for (int i = 0; i < 256; i++) hist[i] = 0;
                 }
             }
+            // Headerless vertex block: the engine streams a coherent run of
+            // vertices with no draw command in front of it. Consume the whole
+            // run and submit it as a draw, instead of stepping one byte into the
+            // payload and turning the rest of the frame into a desync cascade.
+            size_t block_stride = 0, block_count = 0;
+            size_t block_len = 0;
+            static const bool block_recovery = []() {
+                const char *e = std::getenv("NWII_NO_BLOCK_RECOVERY");
+                return !(e && e[0] == '1');
+            }();
+            size_t preferred = VertexSize(g_state.vat[g_last_draw_vat]);
+            if (block_recovery)
+                block_len = MatchVertexBlock(fifo, offset, preferred,
+                                             &block_stride, &block_count);
+            if (block_len) {
+                diag::bump(kSlotHeaderless);
+                static int s_blocks = 0;
+                VATSlot sv;
+                bool have_vat = BuildVatForStride(block_stride, sv);
+                if (s_blocks++ < 8)
+                    printf("[GX] headerless vertex block at 0x%zX: %zu bytes = %zu "
+                           "verts x %zu (vat %s, last draw vat=%d)\n",
+                           offset, block_len, block_count, block_stride,
+                           have_vat ? "built" : "unavailable", g_last_draw_vat);
+                if (have_vat) {
+                    GXCommand c;
+                    c.type = GXCommandType::DrawPrimitive;
+                    // The primitive is not in the stream; a strip is what this
+                    // engine emits through its batched path. NWII_SYNTH_PRIM
+                    // overrides it when the guess is visibly wrong.
+                    c.prim_type = 0x90;
+                    if (const char *e = std::getenv("NWII_SYNTH_PRIM"))
+                        c.prim_type = (uint8_t)std::strtoul(e, nullptr, 0);
+                    c.raw = std::make_shared<DrawRaw>();
+                    c.raw->vat = sv;
+                    c.raw->defPosMtxIdx = g_state.defPosMtxIdx;
+                    std::memcpy(c.raw->defTexMtxIdx, g_state.defTexMtxIdx, 8);
+                    std::memcpy(c.raw->arrayBase, g_state.arrayBase,
+                                sizeof(c.raw->arrayBase));
+                    std::memcpy(c.raw->arrayStride, g_state.arrayStride,
+                                sizeof(c.raw->arrayStride));
+                    c.raw->need_normal = false;
+                    c.raw->count = (uint16_t)block_count;
+                    c.raw->bytes.assign(fifo.begin() + offset,
+                                        fifo.begin() + offset + block_len);
+                    commands.push_back(std::move(c));
+                }
+                offset += block_len;
+                // The continuation invariant compares the previous command with
+                // the byte at `offset`. Jumping over the block leaves that state
+                // pointing into the block, which would report the recovery
+                // itself as a framing error. Resynchronise it instead.
+                trace_prev_off = offset;
+                trace_prev_cmd = 0x00;
+                trace_prev_depth = depth;
+                continue;
+            }
             offset++;
         }
     }
 }
 
-} 
+}

@@ -2,6 +2,7 @@
 #include "input/input_manager.h"
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 using namespace nwii::runtime;
 using namespace nwii::runtime::input;
@@ -143,11 +144,46 @@ void hle_kpad_read_ex(CPUContext& ctx) {
         WiimoteState state = InputManager::get().get_wiimote_state(0);
         uint32_t buttons = state.buttons;
 
-        // Optional automation: press 2 once (~4s) to advance past the strap
-        // screen. Disabled by default so a real player keeps control.
-        static const bool s_auto_advance = (std::getenv("NWII_AUTOADVANCE") != nullptr);
-        if (s_auto_advance && s_kpad_reads >= 240 && s_kpad_reads <= 245) {
-            buttons |= 0x0001;
+        // Scripted button presses, for reaching UI states that are otherwise
+        // blocked behind a prompt. The strap/safety screen does not advance on
+        // its own: it waits for a real button, so a headless run has to supply
+        // one. NWII_AUTOPRESS is a comma-separated list of
+        //     <read_index>:<mask>[:<read_count>]
+        // where mask is a KPAD_BUTTON_* bit (A=0x0800, 2=0x0100, PLUS=0x0010).
+        // NWII_AUTOADVANCE=1 remains as a shorthand for pressing A once at read
+        // 240 (~4 s at 60 Hz) -- the earliest point the strap screen accepts it.
+        struct AutoPress { uint64_t at, mask, count; };
+        static const std::vector<AutoPress> s_presses = []() {
+            std::vector<AutoPress> out;
+            if (const char *e = std::getenv("NWII_AUTOPRESS")) {
+                const char *p = e;
+                while (*p) {
+                    uint64_t at = std::strtoull(p, (char **)&p, 0);
+                    if (*p != ':') break;
+                    ++p;
+                    uint64_t mask = std::strtoull(p, (char **)&p, 0);
+                    uint64_t count = 6;
+                    if (*p == ':') { ++p; count = std::strtoull(p, (char **)&p, 0); }
+                    if (mask) out.push_back({at, mask, count ? count : 6});
+                    while (*p == ',' || *p == ' ') ++p;
+                }
+            }
+            if (out.empty() && std::getenv("NWII_AUTOADVANCE"))
+                out.push_back({240, 0x0800u, 6}); // KPAD_BUTTON_A
+            for (const auto &pr : out)
+                std::cout << "[KPAD] autopress read " << pr.at << " mask 0x"
+                          << std::hex << pr.mask << std::dec << " for " << pr.count
+                          << " reads" << std::endl;
+            return out;
+        }();
+        for (const auto &pr : s_presses) {
+            if (s_kpad_reads >= pr.at && s_kpad_reads < pr.at + pr.count) {
+                buttons |= (uint32_t)pr.mask;
+                if (s_kpad_reads == pr.at)
+                    std::cout << "[KPAD] autopress firing mask 0x" << std::hex
+                              << pr.mask << std::dec << " at read " << s_kpad_reads
+                              << std::endl;
+            }
         }
 
         static uint32_t prev_buttons = 0;

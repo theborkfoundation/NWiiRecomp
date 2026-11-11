@@ -97,9 +97,10 @@ When user reported input not working, analysis of the game's internal disassembl
 
 ## 4. Current Status & Verification
 - **Runtime Sync**: `NWiiRecomp/nWiiRuntime` and `export_rayman_origins/nWiiRuntime` are 100% synchronized (0 diff).
-- **Git Commit**: `d900ca5` in `NWiiRecomp` repository.
-- **Rendering & Audio**: Active 60 FPS graphics rendering confirmed (`efb_nonblack=307196/307200`, 533 draws in 5 seconds).
+- **Rendering & Audio**: The Wii strap/safety screen renders correctly at ~100 FPS
+  (`efb_nonblack=307196/307200`, 491 frames in 5 s, zero error-class events, `NWII_STRICT=1` exits 0).
 - **Input Responsiveness**: Both Keyboard/Mouse and Gamepad fully functional in menus, strap screens, and gameplay.
+- **Main menu**: still not rendered. See §6 for the current blocker and the evidence.
 
 ---
 
@@ -148,3 +149,90 @@ tools/nwii_run.sh 20 /tmp/run.log ./RaymanOrigins <game>   # bounded, summary on
 
 `tools/nwii_run.sh` always kills with SIGKILL: the guest can leave `SIGALRM`
 undelivered, so `alarm(2)`/`timeout(1)` are not reliable bounds here.
+
+---
+
+## 6. Boot sequence: what actually blocks the menu
+
+Establishing this took a byte-level trace of the FIFO producer, so it is written
+down here rather than rediscovered.
+
+### The strap screen is video-gated, not input-gated
+
+`NWII_AUTOPRESS=240:0x800:8` (and every other button) does **not** advance the
+Wii strap/safety screen, even though `KPADReadEx` is called ~60x/s and the press
+is visible in `[KPAD] ReadEx ... trig=0x800`. The screen is a placeholder for the
+prologue movie: it advances only once that movie *completes or fails*.
+`NWII_SKIP_VIDEOS=1` makes the open fail and the state machine moves on;
+`NWII_SKIP_PROLOGUE=1` alone does not.
+
+Consequence: a run reaches the menu phase only with `NWII_SKIP_VIDEOS=1`, and the
+`menumainbackground_v2_WII.ipk` menu background is itself a video, so the same
+mechanism black-screens the menu later.
+
+`NWII_AUTOPRESS` (`<read>:<mask>[:<count>][,...]`) is still useful for driving UI
+once the video gate is out of the way.
+
+### The menu phase streams vertex data with no draw header
+
+With `NWII_SKIP_VIDEOS=1` the engine's batched renderer (emitter `0x8052DAB4`,
+called from the submitter at `0x80542910`, itself called from `0x805438E4`)
+streams whole runs of 24-byte vertices straight into the write-gather pipe. There
+is **no** `0x80|vat`/count header in front of them, confirmed on the producer side
+by `NWII_HDRLOG` (which logs every `stb 0x80..0xB7` + `sth` pair): the only
+headers in the stream are `0x8007D14C` (inside `GXBegin`), i.e.
+`80 00 04` points-flush and `90 xx xx` tristrips from the *other* emitter path.
+
+Concrete instance (`NWII_GXDUMP`, menu phase):
+
+```
+13361  XF 0x1020 projection load (7 floats, values verified)
+13394  8 NOP dwords from 0x8007C510 (libogc flush padding)
+13426  4752 bytes of vertex data from 0x8052DB08..   <- no header
+18178  NOP padding, then state writes resume
+```
+
+4752 = 198 vertices x 24 bytes. The VAT state at that point claims 16 bytes
+(no texcoords), i.e. the VAT is one write behind the payload -- the same defect
+the previous session found for the `0x90 count=528` draw.
+
+Because the parser steps one byte into the float data, reads a mantissa as a
+draw opcode (`0xB5`, count 54961), stalls, and resyncs by scanning for the first
+chance-valid state chain, one missing header used to destroy the rest of the
+frame (and, once resynced mid-payload, the following frames too).
+
+### What the runtime now does about it
+
+`fifo.headerless_vertices` counts these blocks, and the parser consumes them as a
+unit instead of cascading:
+
+* candidate strides are ordered by plausibility (24, 16, 12, 20, 32, ... plus the
+  VAT's own size), and the block end must be followed by a burst of BP/XF writes
+  (NOP padding is skipped first);
+* among the strides that find a valid end, the one whose position triple decodes
+  as finite numbers wins -- a stale stride lands on a colour word and reads
+  `0xFFFFFFFF` as a float, which is what makes the 16-vs-24 choice detectable;
+* the block is submitted as a draw when its layout is one of the expressible ones
+  (12/16/24 bytes), otherwise it is skipped coherently;
+* `NWII_NO_BLOCK_RECOVERY=1` disables the recovery to measure its effect.
+
+Measured effect (same 22 s menu-phase run): `fifo.resync_bytes` 267 KB -> 52 KB,
+`dl.rejected` 75 -> 16, and the picture changed from plain white to decodable
+content. The cascade is reduced, not eliminated: `fifo.bad_continuation` still
+runs at ~1.5k events, so the framing is still wrong elsewhere.
+
+### Also fixed here
+
+`tev_shader_gen.cpp` emitted `vec3 cIn[4]` / `float aIn[4]` (and `cBias`, `cOut`,
+`aBias`, `aOut`) once per TEV stage into one GLSL scope. Any material with two or
+more stages therefore failed to compile with
+`Redeclaration of sized array 'cIn' not allowed`, which silently dropped the
+draw. Each stage is now wrapped in its own block scope. Verified: shader compile
+failures per run went from 6-12 to 0.
+
+### Tools added
+
+`NWiiRecomp/tools/doldis.py <main.dol> <start> <end> [--hex]` -- section-aware disassembly by
+address. A plain `addr - 0x80006a40` file offset only works inside the first DOL
+text section, and capstone stops at the paired-single opcodes this title uses
+everywhere, so `--hex` is the fallback for those stretches.
