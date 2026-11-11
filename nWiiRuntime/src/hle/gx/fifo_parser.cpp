@@ -1037,6 +1037,83 @@ static size_t RepairVertexSize(const std::vector<uint8_t>& f, size_t offset,
     return best;
 }
 
+// Does the stream at `q` -- after any NOP padding -- begin a burst of state
+// writes? A finished draw is followed by the next draw's state setup, and the
+// engine pads its batch with NOPs first, so zeros have to be skipped before the
+// check. Float payload cannot fake two consecutive BP/XF writes.
+static bool StateBurstAt(const std::vector<uint8_t> &f, size_t q) {
+    while (q < f.size() && (f[q] == 0x00 || f[q] == 0x44 || f[q] == 0x48)) ++q;
+    if (q + 1 >= f.size() || !IsStateOpcode(f[q])) return false;
+    size_t s1 = CommandSizeAt(f, q);
+    if (!s1 || q + s1 >= f.size() || !IsStateOpcode(f[q + s1])) return false;
+    return true;
+}
+
+// How far does the stream keep parsing from `q`? Vertex-index payloads contain
+// plenty of small bytes that can look like a state opcode (index 0x08, 0x10),
+// so a single boundary check is not enough to pick a stride. A correct boundary
+// is followed by a long run of well-formed commands; a wrong one derails almost
+// immediately.
+static int ScoreContinuation(const std::vector<uint8_t> &f, size_t q,
+                             int max_cmds = 64) {
+    int n = 0;
+    for (int i = 0; i < max_cmds && q < f.size(); ++i) {
+        uint8_t b = f[q];
+        if (b >= 0x80 && b <= 0xBF) { n += 4; break; } // next draw: a good sign
+        if (b == 0x00 || b == 0x44) { ++q; ++n; continue; } // NOPs are 1 byte
+        size_t s = CommandSizeAt(f, q);
+        if (!s) break;
+        q += s;
+        ++n;
+    }
+    return n;
+}
+
+// The declared vertex format needs more bytes than have arrived, yet a shorter
+// stride yields a payload that fits and is followed by a well-formed stream.
+// That is the stale-VCD signature: the engine streams a compact index format
+// while the state we track still describes an uncompressed direct one, so every
+// draw looks like an incomplete payload and is dropped.
+//
+// Candidates are ranked by how far the stream keeps parsing after the payload,
+// then by closeness to the declared stride. A single state-write check is not
+// enough here: 3-byte index triples are full of bytes that mimic opcodes.
+static size_t RepairStrideToFit(const std::vector<uint8_t> &f, size_t offset,
+                               uint16_t count, size_t expected) {
+    static const size_t kStrides[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24};
+    size_t best = expected;
+    int best_score = -1;
+    for (size_t vs : kStrides) {
+        if (vs >= expected) continue;
+        size_t need = 3 + (size_t)count * vs;
+        // Require real lookahead behind the candidate payload. Near the end of
+        // the buffer the following command simply has not arrived yet, which is
+        // not evidence that the declared format is wrong -- waiting is correct
+        // there, and repairing would truncate a draw that is still streaming.
+        if (offset + need + 256 > f.size()) continue;
+        int score = ScoreContinuation(f, offset + need);
+        static const bool dbg = std::getenv("NWII_STRIDEDBG") != nullptr;
+        static int shown = 0;
+        if (dbg && shown < 40)
+            printf("[STRIDEDBG] count=%u vs=%zu end=%zu score=%d\n", count, vs,
+                   offset + need, score);
+        if (score < 3) continue; // must reach at least a few real commands
+        // Ties go to the more compact stride: the index formats are the ones a
+        // stale attribute description hides, and a wrong (larger) stride is
+        // exactly what swallows the rest of the frame.
+        if (score > best_score || (score == best_score && vs < best)) {
+            best = vs;
+            best_score = score;
+        }
+    }
+    if (best != expected) {
+        static int sel = 0;
+        if (std::getenv("NWII_STRIDEDBG") && sel++ < 20)
+            printf("[STRIDEDBG] chose %zu (score %d)\n", best, best_score);
+    }
+    return best;
+}
+
 // Vertex layout for a given byte stride, for the headerless-block recovery.
 // Only the layouts this title actually emits are built; anything else is
 // rejected so the recovery cannot invent geometry of the wrong shape.
@@ -1122,11 +1199,7 @@ static size_t MatchVertexBlock(const std::vector<uint8_t> &f, size_t offset,
         size_t found_k = 0;
         for (size_t k = 3; k * vs <= max_len; ++k) {
             size_t q = offset + k * vs;
-            size_t r = q;
-            while (r < f.size() && (f[r] == 0x00 || f[r] == 0x44 || f[r] == 0x48)) ++r;
-            if (r + 1 >= f.size() || !IsStateOpcode(f[r])) continue;
-            size_t s1 = CommandSizeAt(f, r);
-            if (!s1 || r + s1 >= f.size() || !IsStateOpcode(f[r + s1])) continue;
+            if (!StateBurstAt(f, q)) continue;
             found_k = k;
             break;
         }
@@ -1187,8 +1260,16 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             // Continuation invariant: the command that just ended must be
             // followed by another command. Only checked with real lookahead, so
             // a buffer that is merely truncated mid-frame is not reported.
+            //
+            // NOPs are exempt: they carry no payload, so they cannot have been
+            // mis-sized. Reporting "NOP followed by non-command" double-counts
+            // the real defect (and fires for every NOP the engine writes in front
+            // of a headerless vertex block, which is legitimate padding).
             const size_t span = offset - trace_prev_off;
-            if (fifo_size >= offset + 64) {
+            const bool prev_nop = (trace_prev_cmd == 0x00 ||
+                                   trace_prev_cmd == 0x44 ||
+                                   trace_prev_cmd == 0x48);
+            if (fifo_size >= offset + 64 && !prev_nop) {
                 const uint8_t nb = fifo[offset];
                 const bool nopish = (nb == 0x00 || nb == 0x44 || nb == 0x48);
                 if (!nopish && CommandSizeAt(fifo, offset) == 0) {
@@ -1506,6 +1587,28 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
                                    "(vat tex0 mask=%d)\n",
                                    offset, vtx_count, vsize, fixed,
                                    (int)vat.texMask[0]);
+                        vsize = fixed;
+                        need = 3 + (size_t)vtx_count * vsize;
+                    }
+                }
+            }
+            if (offset + need > fifo_size) {
+                // The declared format does not fit in what has arrived. Before
+                // waiting for more data (which never comes when the format is
+                // stale), see whether a shorter stride lands exactly on the next
+                // burst of state writes. This is what turns the menu phase's
+                // 528-vertex `0x90` draws from "needs 8451 bytes, have 4132" into
+                // a parsed draw.
+                if (depth == 0 && vtx_count >= 1 && vtx_count <= 4096) {
+                    size_t fixed = RepairStrideToFit(fifo, offset, vtx_count, vsize);
+                    if (fixed != vsize) {
+                        diag::bump(kSlotVsizeFix);
+                        static int s_fitfix = 0;
+                        if (s_fitfix++ < 8)
+                            printf("[GX] stride repair at 0x%zX: count=%u %zu -> %zu "
+                                   "bytes (payload did not fit; cp50=%08X cp60=%08X)\n",
+                                   offset, vtx_count, vsize, fixed,
+                                   g_state.cp[0x50], g_state.cp[0x60]);
                         vsize = fixed;
                         need = 3 + (size_t)vtx_count * vsize;
                     }

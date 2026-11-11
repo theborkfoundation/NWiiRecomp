@@ -236,3 +236,90 @@ failures per run went from 6-12 to 0.
 address. A plain `addr - 0x80006a40` file offset only works inside the first DOL
 text section, and capstone stops at the paired-single opcodes this title uses
 everywhere, so `--hex` is the fallback for those stretches.
+
+---
+
+## 7. The 528-vertex tristrips: a draw whose declared format does not fit
+
+This was the first framing error in the menu phase after the headerless blocks
+were absorbed, and it explains the "draws stop" symptom.
+
+### What the stream says
+
+```
+18582  draw 0x90 vat 0 count 528           <- produced by GXBegin (0x8007D14C)
+18585  1584 bytes of 1-byte index triples  (pos,clr,tex indices)
+20169  31 NOP bytes, then CP writes resume  <- payload ends exactly here
+```
+
+528 x 3 = 1584, and 18585 + 1584 = 20169. The payload is unambiguous.
+
+### What our state says
+
+The last VCD write before that draw is at 13108:
+
+```
+13108  CP 0x50 = 0x00002200   pos direct + clr0 direct, no texcoords
+13114  CP 0x60 = 0x00000000
+```
+
+which decodes to 16 bytes/vertex, so the draw needs 8451 bytes. The buffer held
+4132, so the parser declared the payload incomplete, waited, then resynced and
+dropped the draw. `vat=0` really is the VAT for the draw, and the VAT itself is
+fine -- it is the *VCD* that disagrees with the payload.
+
+### Ruled out
+
+* **CP FIFO ring** (`NWII_CPSTAT=1`): `wp == rp == base`, `drained_total=0` for the
+  whole run. The title never drives the memory ring, so no commands are hiding
+  there.
+* **Off-page WGP writes** (`NWII_WGP_DROP4=1`): every write outside 0xCC008000
+  goes to page offset 0x004 and they *are* FIFO data -- dropping them roughly
+  doubles the error counts (bad_continuation 355 -> 4628).
+* **A missing VCD write in the capture**: a full scan of `NWII_GXDUMP` finds no
+  `08 50`/`08 60` between 13114 and 18582. The engine does not re-emit VCD for
+  this draw; it reuses the one from 13108.
+
+So the engine streams a compact index format under a VCD that describes an
+uncompressed direct one. That is self-consistent on hardware only if the VCD we
+reconstruct is wrong, and we could not find where the write is lost. Open.
+
+### What the runtime does instead
+
+When a draw's declared payload does not fit in the bytes that have arrived, the
+parser now tries shorter strides and keeps the one whose continuation parses
+best (`ScoreContinuation`), instead of dropping the draw:
+
+* candidates are `1,2,3,4,5,6,8,10,12,16,20,24` bytes below the declared stride;
+* each candidate needs 256 bytes of lookahead behind it, so a draw that is simply
+  still streaming is waited for rather than truncated;
+* candidates are ranked by how many commands parse after the payload (a draw
+  counts as a strong hit), because 3-byte index data is full of bytes that mimic
+  opcodes and a single boundary check picks the wrong stride -- the first attempt
+  chose 4 over 3; scoring gives 3 a score of 64 and 4 a score of 35;
+* ties go to the more compact stride.
+
+`NWII_STRIDEDBG=1` prints the candidate scores.
+
+Result: `count=528 16 -> 3 bytes` and `count=456 16 -> 2 bytes`, and the 528
+vertex tristrip is parsed instead of dropped.
+
+### Counter hygiene
+
+`fifo.bad_continuation` no longer fires for NOPs. A NOP carries no payload, so it
+cannot have been mis-sized, and the engine pads every finished batch with NOPs --
+reporting "NOP followed by non-command" counted each of those twice and made the
+counter unreadable.
+
+### Measured, same 20 s menu-phase run (`NWII_SKIP_VIDEOS=1`)
+
+| counter | before this round | after |
+|---|---|---|
+| `fifo.bad_continuation` | 1908 | **362** |
+| `fifo.resync_bytes` | 543599 | **102586** |
+| `dl.rejected` | 405 | **226** |
+| shader compile failures | 6-12 | **0** |
+| `[GX] desync` events | many | **8** |
+
+Draws keep accumulating instead of freezing, but the picture is still wrong
+(white/black), so frame interpretation is better, not correct.
