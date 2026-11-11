@@ -817,12 +817,24 @@ public:
           }
           return s;
         }();
-        if (skip_tex.a[0] || skip_tex.a[1] || skip_tex.a[2] || skip_tex.a[3]) {
+        if ((skip_tex.a[0] || skip_tex.a[1] || skip_tex.a[2] || skip_tex.a[3])) {
           uint32_t base = g_state.texStages[0].base_addr & 0x03FFFFFFu;
           bool skip = false;
           for (int i = 0; i < 4; ++i)
             if (skip_tex.a[i] && base == (skip_tex.a[i] & 0x03FFFFFFu)) skip = true;
           if (skip) continue;
+        }
+
+        // NWII_SKIP_STRAP: drop the Wii wrist-strap / safety overlay. That screen
+        // is a pair of full-screen 640x480 RGB565 quads that this title shows
+        // during boot and cannot complete without the video path, so it hides
+        // everything the game renders underneath. Not a fix -- a way to watch the
+        // game run.
+        static const bool skip_strap = std::getenv("NWII_SKIP_STRAP") != nullptr;
+        if (skip_strap) {
+          const auto &s0 = g_state.texStages[0];
+          if (s0.width == 640 && s0.height == 480 && (int)s0.format == 4)
+            continue;
         }
 
         if (g_ctx_ptr) {

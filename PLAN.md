@@ -385,3 +385,8 @@ decode), not a broken renderer.
 
 This is a diagnostic, not a fix: the strap screen is still on screen in a normal
 run, and the game still has not reached the main menu.
+
+`NWII_SKIP_STRAP=1` is the shorthand for the same thing without hardcoded
+addresses: it drops draws whose stage-0 texture is 640x480 RGB565, which is what
+both wrist-strap pages are. Use it to watch what the game renders underneath
+(`NWII_SKIP_VIDEOS=1 NWII_SKIP_STRAP=1 ./RaymanOrigins <game>`).

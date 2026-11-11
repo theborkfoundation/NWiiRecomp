@@ -45,3 +45,6 @@ log.txt
 *.log
 # Auto-downloaded by CMake (file(DOWNLOAD) in CMakeLists.txt); not committed.
 third_party/dolphin-sigdb/totaldb.dsy
+
+# Development scratch: screenshots, dumps, logs, throwaway notes
+.dev/
