@@ -77,6 +77,23 @@ void cp_process_fifo() {
         g_cp_sr |= 0x0E;
     }
 
+    // GP FIFO breakpoint. GXEnableBreakPt() arms CP_FIFO_BP (0xCC00003C) at the
+    // end of each submitted frame; on real hardware the GP raises the CP
+    // interrupt once it reads past that address, and GXCPInterruptHandler()
+    // checks CP_SR bit 0 to run the game's BPCallback. That callback releases
+    // GFXAdapter_WII::present()/startRendering(), which otherwise block forever
+    // on waitingDoneRender__3ITF.
+    //
+    // The emulated GP consumes the whole FIFO synchronously, so a breakpoint is
+    // always reached as soon as the FIFO drains.
+    if (g_cp_fifo_bp != 0 && g_cp_fifo_rp == g_cp_fifo_wp) {
+        g_cp_fifo_bp = 0;
+        g_cp_sr |= 0x01; // breakpoint
+        g_cp_sr |= 0x12; // breakpoint ack / draw done
+        pi_intmr |= 0x4000;
+        trigger_pi_interrupt(0x4000);
+    }
+
     if (count > 0 && ([](){ static const bool s = (std::getenv("NWII_CPTRACE") != nullptr); return s; })())
         if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CPFIFO] drained " << std::dec << count << " bytes rp=0x"
                   << std::hex << rp0 << "->0x" << rp << " wp=0x" << wp

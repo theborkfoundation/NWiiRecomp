@@ -1,5 +1,6 @@
 #include "runtime/cpu_context.h"
 #include "input/input_manager.h"
+#include <cstdlib>
 #include <iostream>
 
 using namespace nwii::runtime;
@@ -142,8 +143,10 @@ void hle_kpad_read_ex(CPUContext& ctx) {
         WiimoteState state = InputManager::get().get_wiimote_state(0);
         uint32_t buttons = state.buttons;
 
-        // Auto-advance past strap screen if unattended/automated test (brief pulse at ~4 seconds)
-        if (s_kpad_reads >= 240 && s_kpad_reads <= 245) {
+        // Optional automation: press 2 once (~4s) to advance past the strap
+        // screen. Disabled by default so a real player keeps control.
+        static const bool s_auto_advance = (std::getenv("NWII_AUTOADVANCE") != nullptr);
+        if (s_auto_advance && s_kpad_reads >= 240 && s_kpad_reads <= 245) {
             buttons |= 0x0001;
         }
 

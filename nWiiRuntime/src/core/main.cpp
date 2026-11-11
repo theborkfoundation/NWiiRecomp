@@ -59,6 +59,8 @@ void cpu_thread_func(nwii::runtime::CPUContext *ctx) {
 }
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <path_to_unpacked_game_dir> [config_path]\n";
@@ -270,6 +272,14 @@ int main(int argc, char **argv) {
 
   arena_lo = (arena_lo + 31) & ~31;
 
+  // __OSThreadInit carves a fixed 64 KiB stack for the default thread
+  // immediately above .bss (this image: stackBottom 0x80737030, stackTop
+  // 0x80747030, i.e. _end .. _end + 0x10000). The apploader-provided
+  // arenaLo ends up in BootInfo->arenaLo, which OSInit trusts verbatim, so
+  // if we report _end the game's heap starts inside main's stack and hands
+  // out thread stacks that overlap it. Reserve the boot stack first.
+  arena_lo = (arena_lo + 0x10000u + 31) & ~31u;
+
   
 
   {
@@ -455,7 +465,10 @@ int main(int argc, char **argv) {
       nwii::runtime::hw::cp_process_fifo();
       ProcessGXFifo();
       if (ctx && (ctx->mmu.read32(0x806ab198) != 0 || ctx->mmu.read32(0x80796e50) != 0)) {
-        nwii::runtime::hw::cp_signal_draw_done();
+        uint16_t q1_head = ctx->mmu.read16(0x8072B254);
+        if (q1_head < 5) {
+          nwii::runtime::hw::cp_signal_draw_done();
+        }
       }
       ctx->vblank_pending = true;
       if (std::getenv("NWII_SAMPLE") && (++tick % 60) == 0) {
@@ -690,7 +703,14 @@ int main(int argc, char **argv) {
 
         if (const char *shot_pfx = std::getenv("NWII_SCREENSHOT")) {
           static int shot_frame = 0;
-          if ((++shot_frame % 300) == 0) {
+          static const int shot_every = []() {
+            if (const char *e = std::getenv("NWII_SHOT_EVERY")) {
+              int v = std::atoi(e);
+              if (v > 0) return v;
+            }
+            return 300;
+          }();
+          if ((++shot_frame % shot_every) == 0) {
             std::vector<unsigned char> px(640 * 480 * 4);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
             glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());

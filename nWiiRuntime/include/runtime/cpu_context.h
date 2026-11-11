@@ -758,6 +758,7 @@ bool in_recompiled_code(uint32_t pc);
 
 extern bool g_trace_calls;
 void trace_call(uint32_t func_addr, CPUContext& ctx);
+void trace_recent_dump(const char* why);
 
 
 

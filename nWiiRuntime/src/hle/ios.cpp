@@ -717,6 +717,30 @@ void hle_drive_thread_queue(CPUContext& ctx) {
 
 
 static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
+  if (std::getenv("NWII_DBG_SAVE")) {
+    std::cout << "[Save] c=0x" << std::hex << c << " pc=0x" << ctx.pc
+              << " r1=0x" << ctx.gpr[1]
+              << " d4=0x" << ctx.mmu.read32(0x800000D4)
+              << " saved=0x" << ctx.dispatch_saved_ctx
+              << " cur=0x" << ctx.mmu.read32(0x800000E4) << std::dec << "\n";
+  }
+  if (std::getenv("NWII_DBG_CTX")) {
+    static int n = 0;
+    if (n++ < 100)
+      std::cout << "[SaveCtx] c=0x" << std::hex << c << " pc=0x" << ctx.pc
+                << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
+                << " depth=" << std::dec << ctx.callback_depth
+                << " in_cb=" << (int)ctx.in_callback
+                << " dispatch_saved=0x" << std::hex << ctx.dispatch_saved_ctx
+                << std::dec << "\n";
+  }
+  if (std::getenv("NWII_DBG_LOADCTX")) {
+      if (ctx.pc < 0x80000000u || ctx.pc >= 0x806aa7e0u) {
+          std::cout << "[DbgHleSave] BAD pc=0x" << std::hex << ctx.pc
+                    << " lr=0x" << ctx.lr << " c=0x" << c << std::dec
+                    << "\n";
+      }
+  }
   if (s_env_sample()) {
       static int n = 0;
       if (n++ < 40)
@@ -760,6 +784,13 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
 
 
 static bool hle_load_context_from_guest(CPUContext &ctx) {
+  if (std::getenv("NWII_DBG_CTX")) {
+    static int n = 0;
+    if (n++ < 100)
+      std::cout << "[LoadCtx] in pc=0x" << std::hex << ctx.pc
+                << " d4=0x" << ctx.mmu.read32(0x800000D4)
+                << " r1_before=0x" << ctx.gpr[1] << std::dec << "\n";
+  }
   uint32_t c = ctx.mmu.read32(0x800000D4);
   if (c == 0)
     return false;
@@ -787,24 +818,69 @@ static bool hle_load_context_from_guest(CPUContext &ctx) {
     uint64_t d = ctx.mmu.read64(c + 0x1C8 + i * 8);
     std::memcpy(&ctx.ps1[i], &d, 8);
   }
-  ctx.pc = ctx.mmu.read32(c + 0x198);  
-  ctx.msr = ctx.mmu.read32(c + 0x19C); 
+  ctx.pc = ctx.mmu.read32(c + 0x198);
+  ctx.msr = ctx.mmu.read32(c + 0x19C);
 
   
 
   
   ctx.mmu.write16(c + 0x1A2, ctx.mmu.read16(c + 0x1A2) & ~0x0002);
+  if (std::getenv("NWII_DBG_SAVE")) {
+    std::cout << "[Load] c=0x" << std::hex << c << " -> pc=0x" << ctx.pc
+              << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1] << std::dec << "\n";
+  }
   return true;
 }
 
 int g_trace_after_dec = 0;
+
+// Address of the scheduler's static idle context (`IdleContext`, see
+// __OSThreadInit: OSClearContext(&IdleContext)).
+static constexpr uint32_t IDLE_CONTEXT = 0x80718650u;
+
+// True when __OSCurrentContext names a context that is guaranteed to stay
+// alive across the whole dispatch: either the running thread's embedded
+// OSContext or the static IdleContext.
+//
+// DecrementerExceptionCallback publishes a *temporary* context on its own
+// stack (OSSetCurrentContext(r1+8)) while it invokes the alarm handler. If an
+// interrupt were dispatched while that context is current, the host would save
+// 0x2C8 bytes into a stack frame; if the frame dies before the matching
+// restore, the context is stale and the next save lands on whatever now
+// occupies those addresses (in practice the live SelectThread frame, which is
+// what corrupted the scheduler stack). Defer instead: the source stays
+// pending and is taken as soon as the callback restores a stable context.
+static bool dispatch_context_is_stable(const CPUContext &ctx) {
+  uint32_t c = ctx.mmu.read32(0x800000D4);
+  if (c == 0)
+    return false;
+  if (c == IDLE_CONTEXT)
+    return true;
+  return c == ctx.mmu.read32(0x800000E4);
+}
+
+static void dbg_disp(const char *kind, uint32_t handler, uint32_t c,
+                     const CPUContext &ctx) {
+  if (!std::getenv("NWII_DBG_SAVE"))
+    return;
+  std::cout << "[Disp] " << kind << " handler=0x" << std::hex << handler
+            << " ctx=0x" << c << " pc=0x" << ctx.pc << " msr=0x" << ctx.msr
+            << " cur=0x" << ctx.mmu.read32(0x800000E4)
+            << " saved=0x" << ctx.dispatch_saved_ctx << std::dec << "\n";
+}
 
 bool process_pending_callbacks(CPUContext &ctx) {
   if (s_env_sample()) {
     static uint64_t sample_n = 0;
     if ((++sample_n % 20000) == 0) {
       std::cout << "[Sample] pc=0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
-                << " r3=0x" << ctx.gpr[3] << " r1=0x" << ctx.gpr[1] << std::dec << "\n";
+                << " r3=0x" << ctx.gpr[3] << " r1=0x" << ctx.gpr[1]
+                << " in_cb=" << std::dec << (int)ctx.in_callback
+                << " depth=" << ctx.callback_depth
+                << " bk=" << ctx.backup_stack.size()
+                << " saved=0x" << std::hex << ctx.dispatch_saved_ctx
+                << " cur=0x" << ctx.mmu.read32(0x800000E4)
+                << " d4=0x" << ctx.mmu.read32(0x800000D4) << std::dec << "\n";
     }
   }
 
@@ -838,6 +914,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.gpr[3] = 0;
       ctx.lr = 0xFFFFFFFC;
       ctx.pc = g_resched_addr;
+      dbg_disp("resched", g_resched_addr, 0, ctx);
       return true;
     }
   }
@@ -845,18 +922,33 @@ bool process_pending_callbacks(CPUContext &ctx) {
   if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
     ctx.ext_resched_pending = false;
     if (ctx.dispatch_saved_ctx) {
-      uint32_t current_thread = ctx.mmu.read32(0x800000E4);
-      if (current_thread != 0 && current_thread != ctx.dispatch_saved_ctx) {
-        ctx.mmu.write32(0x800000D4, current_thread);
-      } else {
-        ctx.mmu.write32(0x800000D4, ctx.dispatch_saved_ctx);
+      if (std::getenv("NWII_DBG_CTX")) {
+        static int n = 0;
+        if (n++ < 100)
+          std::cout << "[RestoreDisp] saved=0x" << std::hex
+                    << ctx.dispatch_saved_ctx << " current_thread=0x"
+                    << ctx.mmu.read32(0x800000E4) << " pc=0x" << ctx.pc
+                    << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
+                    << " bk=" << std::dec << ctx.backup_stack.size()
+                    << "\n";
       }
+      ctx.mmu.write32(0x800000D4, ctx.dispatch_saved_ctx);
       ctx.dispatch_saved_ctx = 0;
     }
     if (hle_load_context_from_guest(ctx)) {
       ctx.dec_written_tb = ctx.read_timebase();
       static uint32_t restore_count = 0;
       restore_count++;
+      if (std::getenv("NWII_DBG_CTX")) {
+        static int n = 0;
+        bool bad = (ctx.pc < 0x80004000u || ctx.pc >= 0x806aa7e0u ||
+                    ctx.gpr[1] < 0x80000000u || ctx.lr < 0x80000000u);
+        if (bad && n++ < 200)
+          std::cout << "[BADRESTORE] #" << std::dec << restore_count
+                    << " pc=0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
+                    << " r1=0x" << ctx.gpr[1] << " srr0=0x" << ctx.srr0
+                    << " msr=0x" << ctx.msr << std::dec << "\n";
+      }
       if (ctx.pc == 0 || (restore_count % 64) == 1) {
           if (s_env_debug()) std::cout << "[HLE PI] Context restore #" << std::dec << restore_count
                     << " pc=0x" << std::hex << ctx.pc << " r1=0x" << ctx.gpr[1]
@@ -973,16 +1065,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
       }
   }
 
-  if (g_ipc_interrupt_delay > 0) {
-      g_ipc_interrupt_delay--;
-      if (g_ipc_interrupt_delay == 0) {
-          nwii::runtime::hw::trigger_pi_interrupt(0x00000010);
-          if (s_env_sample())
-              std::cout << "[IPC] irq raised intmr=0x" << std::hex
-                        << nwii::runtime::hw::pi_intmr << " msr=0x" << ctx.msr
-                        << " pc=0x" << ctx.pc << std::dec << "\n";
-      }
-  }
+  nwii::runtime::hw::ipc_tick();
 
   
   nwii::runtime::hw::di_tick();
@@ -995,7 +1078,14 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {
-    
+    if (std::getenv("NWII_DBG_CTX")) {
+      static int n = 0;
+      if (n++ < 100)
+        std::cout << "[CbReturn] pc=0xfffffffc r1=0x" << std::hex << ctx.gpr[1]
+                  << " lr=0x" << ctx.lr << " depth=" << std::dec
+                  << ctx.callback_depth << " bk=" << ctx.backup_stack.size()
+                  << "\n";
+    }
     ctx.in_callback = false;
   }
 
@@ -1032,9 +1122,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
           if (vi_period == 0) vi_period = 500000;
           nwii::runtime::EventScheduler::get().schedule_recurring(
               vi_period, [](CPUContext& c, uint64_t) {
-
-                  
-                  
                   uint32_t vi_h = c.mmu.read32(0x800030A0);
                   bool vi_unmasked = (nwii::runtime::hw::pi_intmr & 0x100) &&
                                      (vi_h != 0 && vi_h != 0xFFFFFFFF);
@@ -1049,7 +1136,14 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   
-  if (ctx.dec_expired() && (ctx.msr & 0x8000) && !ctx.in_callback) {
+  // Do not start a new interrupt dispatch while a previous one is still in
+  // flight (the handler re-enabled EE and an interrupt arrived). A single
+  // dispatch_saved_ctx slot cannot represent nesting: a nested save would
+  // clobber the outer resume point and can write 0x2C8 bytes into a stack
+  // context whose frame is already gone. Leave the source pending instead;
+  // it will be taken as soon as the outer handler returns.
+  if (ctx.dec_expired() && (ctx.msr & 0x8000) && !ctx.in_callback &&
+      ctx.dispatch_saved_ctx == 0 && dispatch_context_is_stable(ctx)) {
       ctx.dec_irq_pending = false; 
       if (s_env_sample()) {
           static uint32_t df = 0;
@@ -1148,6 +1242,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
           
           ctx.lr = 0xFFFFFFFC;
           ctx.pc = dec_handler;
+          dbg_disp("dec", dec_handler, current_ctx, ctx);
           longjmp(ctx.exception_jmp_buf, 1);
       }
   }
@@ -1168,7 +1263,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
   uint32_t active_ints = nwii::runtime::hw::pi_intsr & effective_intmr;
 
   
-  if (active_ints != 0 && (ctx.msr & 0x8000)) {
+  if (active_ints != 0 && (ctx.msr & 0x8000) &&
+      ctx.dispatch_saved_ctx == 0 && !ctx.in_callback &&
+      dispatch_context_is_stable(ctx)) {
 
       
 
@@ -1242,21 +1339,24 @@ bool process_pending_callbacks(CPUContext &ctx) {
               ctx.srr0 = ctx.pc;
               ctx.srr1 = ctx.msr;
 
-              
-              
+              // NOTE: __OSCurrentContext (0x800000D4) may legitimately hold any
+              // address. The OS publishes a temporary OSContext on the stack
+              // while it runs alarm handlers (DecrementerExceptionCallback does
+              // OSSetCurrentContext(r1+8)), and the scheduler publishes the
+              // static IdleContext while idling. The hardware exception entry
+              // saves the interrupted registers into whatever context is
+              // current, so mirror that instead of second-guessing the value.
               uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
               if (current_ctx == 0) {
-                  current_ctx = ctx.mmu.read32(0x800000D0);
-              }
-              if (current_ctx == 0) {
-                  std::cout << "[HLE PI] FATAL: current_ctx is 0! pc=0x" << std::hex << ctx.pc << " intmr=0x" << nwii::runtime::hw::pi_intmr << " intsr=0x" << nwii::runtime::hw::pi_intsr << std::dec << "\n";
+                  if (std::getenv("NWII_DBG_CTX")) {
+                      static int n = 0;
+                      if (n++ < 20)
+                          std::cout << "[PI Defer] no valid ctx pc=0x" << std::hex << ctx.pc << std::dec << "\n";
+                  }
+                  return false;
               }
 
-              
-              
-              if (current_ctx != 0) {
-                  hle_save_context_to_guest(ctx, current_ctx);
-              }
+              hle_save_context_to_guest(ctx, current_ctx);
 
               
               ctx.gpr[3] = 0x04;
@@ -1339,12 +1439,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       }
                       uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
                       if (current_ctx == 0) {
-                          current_ctx = ctx.mmu.read32(0x800000D0);
-                      }
-                      if (current_ctx == 0) {
-                          current_ctx = ctx.mmu.read32(0x800000E4);
-                      }
-                      if (current_ctx == 0) {
                           if (s_env_sample()) {
                               static int n = 0;
                               if (n++ < 4)
@@ -1352,8 +1446,35 @@ bool process_pending_callbacks(CPUContext &ctx) {
                                             << os_intr << " deferred: no current context\n";
                           }
                           return false;
-                      } else {
-                          
+                      }
+                      {
+                          // See the note above: any value of __OSCurrentContext
+                          // is legitimate here (stack temp context or
+                          // IdleContext). Save into it like the hardware does.
+                          static const bool s_via_exc =
+                              (std::getenv("NWII_PI_VIA_EXC") != nullptr);
+                          if (s_via_exc) {
+                              // Faithful path: enter the guest's exception-4
+                              // stub (0x8009B3D0) which finishes saving the
+                              // registers and calls __OSDispatchInterrupt. The
+                              // guest then runs the handler, __OSUnlockScheduler,
+                              // __OSReschedule and OSLoadContext itself, so no
+                              // host-side reschedule injection is needed and no
+                              // handler frame is left on the interrupted stack.
+                              // The PI cause bit must stay set: __OSDispatchInterrupt
+                              // derives the interrupt number from it.
+                              hle_save_context_to_guest(ctx, current_ctx);
+                              ctx.dispatch_saved_ctx = 0;
+                              ctx.srr0 = ctx.pc;
+                              ctx.srr1 = ctx.msr;
+                              ctx.msr &= ~0x8000u;
+                              ctx.gpr[3] = 4;
+                              ctx.gpr[4] = current_ctx;
+                              ctx.lr = 0xFFFFFFFC;
+                              ctx.pc = 0x8009B3D0;
+                              dbg_disp("pi-exc", 0x8009B3D0, current_ctx, ctx);
+                              longjmp(ctx.exception_jmp_buf, 1);
+                          }
                           nwii::runtime::hw::pi_intsr &= ~bit_to_clear;
                           hle_save_context_to_guest(ctx, current_ctx);
                           ctx.dispatch_saved_ctx = current_ctx;
@@ -1365,43 +1486,23 @@ bool process_pending_callbacks(CPUContext &ctx) {
                           ctx.lr = 0xFFFFFFFC;
                           ctx.pc = handler;
                           ctx.ext_resched_pending = true;
+                          dbg_disp("pi", handler, current_ctx, ctx);
                           longjmp(ctx.exception_jmp_buf, 1);
                       }
-
-                      ctx.msr &= ~0x8000u;
-                      CPUContext::BackupState bk;
-                      bk.gpr = ctx.gpr;
-                      bk.fpr = ctx.fpr;
-                      bk.ps1 = ctx.ps1;
-                      bk.cr  = ctx.cr;
-                      bk.lr  = ctx.lr;
-                      bk.ctr = ctx.ctr;
-                      bk.xer = ctx.xer;
-                      bk.pc  = ctx.pc;
-                      bk.srr0 = ctx.srr0;
-                      bk.srr1 = ctx.srr1;
-                      bk.msr = ctx.msr | 0x8000;
-                      bk.fpscr = ctx.fpscr;
-                      bk.gqr = ctx.gqr;
-                      bk.sprg = ctx.sprg;
-                      ctx.backup_stack.push(bk);
-
-                      ctx.in_callback = true;
-                      ctx.callback_depth++;
-                      ctx.srr0 = ctx.pc;
-                      ctx.srr1 = ctx.msr | 0x8000;
-                      ctx.gpr[3] = os_intr;
-                      ctx.gpr[4] = 0;
-                      ctx.lr = 0xFFFFFFFC;
-                      ctx.pc = handler;
-                      longjmp(ctx.exception_jmp_buf, 1);
                   } else {
+                      // No handler registered for this PI cause. Hardware still
+                      // latches/acknowledges it in INTSR, so clear it here.
+                      // Leaving it pending starves every lower-priority cause:
+                      // a stale VI bit (0x100) with no handler permanently
+                      // blocks the IPC reply IRQ (0x10), which hangs the first
+                      // async IOS call (ES close) during boot.
+                      nwii::runtime::hw::clear_pi_interrupt(bit_to_clear);
                       if (s_env_debug()) {
                           static int null_warn_count = 0;
                           if (null_warn_count++ < 3)
                               std::cout << "[HLE PI] Handler for interrupt "
                                         << std::dec << os_intr
-                                        << " is NULL (OS reinit in progress, deferring)."
+                                        << " is NULL; acknowledged and dropped."
                                         << std::endl;
                       }
                   }
@@ -1413,6 +1514,12 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if ((ctx.msr & 0x8000) == 0)
+    return false;
+
+  if (ctx.dispatch_saved_ctx != 0)
+    return false;
+
+  if (!dispatch_context_is_stable(ctx))
     return false;
 
   if (ctx.pending_cb_count.load(std::memory_order_relaxed) == 0)
@@ -1436,6 +1543,15 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
+  if (std::getenv("NWII_DBG_CTX")) {
+    static int n = 0;
+    if (n++ < 100)
+      std::cout << "[CbCall] current_ctx=0x" << std::hex << current_ctx
+                << " cb=0x" << cb.cb_addr << " pc=0x" << ctx.pc
+                << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
+                << " depth=" << std::dec << ctx.callback_depth
+                << " bk=" << ctx.backup_stack.size() << "\n";
+  }
   if (current_ctx != 0) {
 
     hle_save_context_to_guest(ctx, current_ctx);
@@ -1450,6 +1566,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
     ctx.lr = 0xFFFFFFFC;
     ctx.pc = cb.cb_addr;
+    dbg_disp("cb-gctx", cb.cb_addr, current_ctx, ctx);
     longjmp(ctx.exception_jmp_buf, 1);
   }
 
@@ -1483,6 +1600,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
   ctx.lr = 0xFFFFFFFC;
   ctx.pc = cb.cb_addr;
+  dbg_disp("cb-stack", cb.cb_addr, 0, ctx);
   longjmp(ctx.exception_jmp_buf, 1);
 }
 

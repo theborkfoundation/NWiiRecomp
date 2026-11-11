@@ -78,6 +78,18 @@ void pe_signal_token(uint32_t token, bool raise_interrupt) {
     if (n++ < 6)
         if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[PE] token 0x" << std::hex << token << (raise_interrupt ? " +int" : "") << std::dec << "\n";
     g_pe_token = token;
+
+    // The GP echoes the draw-sync token back into __GXData->drawSync (u16 at
+    // __GXData + 0x0E); GXReadDrawSync() polls exactly that field. Without this
+    // GFXAdapter_WII::syncGPU() (GXSetDrawSync(0xCAFE) then poll) never
+    // completes and the game stops submitting draws after world load.
+    // __GXData is the pointer held at r13 - 0x6610.
+    if (CPUContext *ctx = nwii::runtime::g_ctx_ptr) {
+        uint32_t gx = ctx->mmu.read32(ctx->gpr[13] - 0x6610);
+        if (gx >= 0x80000000u && gx < 0x94000000u)
+            ctx->mmu.write16(gx + 0x0E, static_cast<uint16_t>(token));
+    }
+
     if (raise_interrupt) {
         g_pe_token_pending = true;
         pe_update_interrupts();

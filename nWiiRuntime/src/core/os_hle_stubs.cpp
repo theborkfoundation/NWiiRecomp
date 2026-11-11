@@ -23,10 +23,48 @@ uint64_t nwii::runtime::get_os_time() {
 }
 
 namespace nwii::runtime {
-bool g_trace_calls = []() {
+static const bool g_trace_print = []() {
   const char *env = std::getenv("NWII_TRACE_CALLS");
   return env && env[0] == '1';
 }();
+
+// Cheap always-on recorder of the most recently entered generated
+// functions, dumped once when the interpreter lands on a bad PC so the
+// caller chain that got there is still visible. No printing on the hot path.
+static const bool g_trace_recent_enabled =
+    (std::getenv("NWII_TRACE_RECENT") != nullptr);
+
+bool g_trace_calls = (g_trace_print || g_trace_recent_enabled);
+
+namespace {
+struct RecentCall {
+  uint32_t func;
+  uint32_t lr;
+  uint32_t r3;
+  uint32_t r4;
+  uint32_t r13;
+};
+constexpr size_t kRecentCallCount = 160;
+RecentCall g_recent_calls[kRecentCallCount];
+size_t g_recent_pos = 0;
+size_t g_recent_len = 0;
+bool g_recent_dumped = false;
+} // namespace
+
+void trace_recent_dump(const char* why) {
+  if (g_recent_dumped) return;
+  g_recent_dumped = true;
+  std::cerr << "[TraceRecent] dump (" << why << "): last " << g_recent_len
+            << " generated calls, oldest first\n";
+  for (size_t i = 0; i < g_recent_len; ++i) {
+    const RecentCall& e =
+        g_recent_calls[(g_recent_pos + kRecentCallCount - g_recent_len + i) %
+                       kRecentCallCount];
+    std::cerr << "  func=0x" << std::hex << e.func << " lr=0x" << e.lr
+             << " r3=0x" << e.r3 << " r4=0x" << e.r4 << " r13=0x" << e.r13
+             << std::dec << "\n";
+  }
+}
 
 uint32_t g_watch_addr = []() -> uint32_t {
   const char *env = std::getenv("NWII_WATCH");
@@ -78,6 +116,13 @@ void note_null_call(uint32_t site, uint32_t lr) {
 }
 
 void trace_call(uint32_t func_addr, CPUContext &ctx) {
+  if (g_trace_recent_enabled) {
+    g_recent_calls[g_recent_pos] = {func_addr, ctx.lr, ctx.gpr[3], ctx.gpr[4],
+                                    ctx.gpr[13]};
+    g_recent_pos = (g_recent_pos + 1) % kRecentCallCount;
+    if (g_recent_len < kRecentCallCount) ++g_recent_len;
+  }
+  if (!g_trace_print) return;
   if (!g_trace_only.empty() && !g_trace_only.count(func_addr)) return;
   std::cout << "[CALL] 0x" << std::hex << func_addr << " lr=0x" << ctx.lr
             << " r3=0x" << ctx.gpr[3] << " r4=0x" << ctx.gpr[4] << " r5=0x"

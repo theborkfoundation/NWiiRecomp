@@ -599,6 +599,14 @@ bool interpret_one(CPUContext& ctx) {
         break;
     }
     default:
+        trace_recent_dump("first unhandled opcode");
+        if (std::getenv("NWII_INTERP_HALT")) {
+            std::cerr << "[Interp] HALT at 0x" << std::hex << pc << " insn=0x"
+                      << insn << std::dec << " lr=0x" << std::hex << ctx.lr
+                      << std::dec << "\n";
+            ctx.is_running = 0;
+            return false;
+        }
         std::cerr << "[Interp] Unhandled opcode " << op << " at 0x"
                   << std::hex << pc << " insn=0x" << insn << std::dec
                   << " (nop)\n";
@@ -715,6 +723,11 @@ void interpret_step(CPUContext& ctx) {
                       << " r1=0x" << ctx.gpr[1] << " r3=0x" << ctx.gpr[3]
                       << std::dec << "\n";
         }
+        if (std::getenv("NWII_INTERP_HALT")) {
+            trace_recent_dump("wild jump");
+            ctx.is_running = 0;
+            return;
+        }
     }
 
     
@@ -757,6 +770,7 @@ void interpret_step(CPUContext& ctx) {
                 continue;
             }
             if ((ctx.pc & 0x3FFFFFFF) < 0x100) {
+                trace_recent_dump("jump to low address");
                 std::cout << "[Interp] Jump to low address 0x" << std::hex
                           << ctx.pc << " from 0x" << before << " insn=0x"
                           << ctx.mmu.read32(before) << " lr=0x" << ctx.lr
@@ -771,8 +785,19 @@ void interpret_step(CPUContext& ctx) {
                 return;
         }
     }
-    std::cout << "[Interp] Budget exceeded at 0x" << std::hex << ctx.pc
-              << std::dec << "\n";
+    if (std::getenv("NWII_INTERP_DBG")) {
+        static int dbg_n = 0;
+        if (dbg_n++ < 6) {
+            std::cout << "[Interp] Budget exceeded at 0x" << std::hex << ctx.pc
+                      << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1];
+            for (int k = 0; k < 8; ++k)
+                std::cout << " " << ctx.mmu.read32(ctx.pc + k * 4);
+            std::cout << std::dec << "\n";
+        }
+    } else {
+        std::cout << "[Interp] Budget exceeded at 0x" << std::hex << ctx.pc
+                  << std::dec << "\n";
+    }
 }
 
 void micro_interpret(CPUContext& ctx, uint32_t opcode, uint32_t pc) {

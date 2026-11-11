@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <deque>
 
 namespace nwii::runtime {
     extern CPUContext* g_ctx_ptr;
@@ -19,13 +20,51 @@ static uint32_t ipc_arm_ctrl = 0;
 static uint32_t ipc_ppc_ctrl = 0;
 uint32_t ipc_ppc_msg = 0;
 
+static std::deque<uint32_t> g_ipc_reply_queue;
+
+void check_deliver_queued_reply() {
+    if (!(pi_intsr.load(std::memory_order_relaxed) & 0x10) && nwii::runtime::g_ipc_interrupt_delay == 0 && !g_ipc_reply_queue.empty()) {
+        ipc_arm_msg = g_ipc_reply_queue.front();
+        g_ipc_reply_queue.pop_front();
+        ipc_arm_ctrl = 0x00000003;
+        ipc_ppc_ctrl &= ~0x01;
+        ipc_ppc_ctrl |= 0x26;
+        nwii::runtime::g_ipc_interrupt_delay = 5;
+    }
+}
+
+static void push_reply(uint32_t req_addr) {
+    uint32_t msg = req_addr & 0x1FFFFFFF;
+    if (g_ipc_reply_queue.empty() && !(pi_intsr.load(std::memory_order_relaxed) & 0x10) && nwii::runtime::g_ipc_interrupt_delay == 0) {
+        ipc_arm_msg = msg;
+        ipc_arm_ctrl = 0x00000003;
+        ipc_ppc_ctrl &= ~0x01;
+        ipc_ppc_ctrl |= 0x26;
+        nwii::runtime::g_ipc_interrupt_delay = 50;
+    } else {
+        g_ipc_reply_queue.push_back(msg);
+    }
+}
+
+void ipc_tick() {
+    if (nwii::runtime::g_ipc_interrupt_delay > 0) {
+        nwii::runtime::g_ipc_interrupt_delay--;
+        if (nwii::runtime::g_ipc_interrupt_delay == 0) {
+            trigger_pi_interrupt(0x00000010);
+        }
+        return;
+    }
+    check_deliver_queued_reply();
+}
+
 extern "C" int32_t handle_ios_ipc(nwii::runtime::CPUContext& ctx, uint32_t request_addr);
 
 int32_t dispatch_ipc(CPUContext& ctx, uint32_t virt_addr) {
   int32_t result = handle_ios_ipc(ctx, virt_addr);
 
-  ipc_arm_msg  = virt_addr & 0x1FFFFFFF;
-  ipc_arm_ctrl = 0x00000003; 
+  if (result != -0x70000001) {
+    push_reply(virt_addr);
+  }
   
   return result;
 }
@@ -39,19 +78,11 @@ int32_t ipc_dispatch_request(CPUContext &ctx, uint32_t req_addr) {
 }
 
 void hle_set_ipc_arm_msg(uint32_t req_addr) {
-  ipc_arm_msg = req_addr & 0x1FFFFFFF;
-  ipc_arm_ctrl = 0x00000002;
-  ipc_ppc_ctrl |= 0x00000004;
-  g_ipc_interrupt_delay = 5000;
+  push_reply(req_addr);
 }
 
-
-
 void ipc_post_reply(uint32_t req_addr) {
-  ipc_arm_msg = req_addr & 0x1FFFFFFF;
-  ipc_ppc_ctrl &= ~0x01;
-  ipc_ppc_ctrl |= 0x26; 
-  g_ipc_interrupt_delay = 50;
+  push_reply(req_addr);
 }
 
 void register_ipc(MMIODispatcher& dispatcher) {{
@@ -77,27 +108,17 @@ void register_ipc(MMIODispatcher& dispatcher) {{
                 ipc_ppc_ctrl = (ipc_ppc_ctrl & ~0x30) | (val & 0x30);
 
                 if (val & 0x01) {
-                    
                     ipc_ppc_ctrl |= 0x01;
                     int32_t result = 0;
                     if (g_ctx_ptr) {
-                        
                         result = ipc_dispatch_request(*g_ctx_ptr, ipc_ppc_msg);
                     }
                     if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
+                    ipc_ppc_ctrl &= ~0x01;
                     if (result != -0x70000001) { 
-                        
-                        ipc_ppc_ctrl &= ~0x01;
-                        ipc_ppc_ctrl |= 0x26; 
-                        
-                        g_ipc_interrupt_delay = 50;
+                        ipc_ppc_ctrl |= 0x26;
                     } else {
-
-                        
-
-                        ipc_ppc_ctrl &= ~0x01;
-                        ipc_ppc_ctrl |= 0x2C; 
-                        g_ipc_interrupt_delay = 50;
+                        ipc_ppc_ctrl |= 0x04; 
                     }
                 }
 
@@ -118,6 +139,7 @@ void register_ipc(MMIODispatcher& dispatcher) {{
                                       << val << " swallows pending irq\n" << std::dec;
                     }
                     clear_pi_interrupt(0x00000010);
+                    check_deliver_queued_reply();
                 }
                 break;
             }

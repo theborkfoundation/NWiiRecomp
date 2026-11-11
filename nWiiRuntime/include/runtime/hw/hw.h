@@ -24,6 +24,7 @@ inline void clear_pi_interrupt(uint32_t mask) {
 
 void vi_trigger_interrupt();
 void ipc_post_reply(uint32_t req_addr); 
+void ipc_tick();
 void ai_update();
 void dsp_trigger_interrupt();
 

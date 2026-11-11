@@ -7,13 +7,6 @@
 
 namespace nwii::runtime::devices {
 
-
-
-
-
-
-
-
 namespace {
 constexpr uint32_t USBV0_CTRLMSG = 0;
 constexpr uint32_t USBV0_BLKMSG = 1;
@@ -36,9 +29,6 @@ public:
     }
 
     int32_t ioctlv(CPUContext& ctx, const IpcRequest& req) override {
-
-        
-        
         uint32_t out_ptr = 0, out_len = 0;
         for (size_t i = req.ioctlv_vecs.size(); i-- > 0;) {
             const auto& v = req.ioctlv_vecs[i];
@@ -51,10 +41,6 @@ public:
 
         switch (req.ioctl_cmd) {
         case USBV0_CTRLMSG: {
-
-            
-
-            
             for (size_t i = req.ioctlv_vecs.size(); i-- > 0;) {
                 uint32_t p = req.ioctlv_vecs[i].addr;
                 if (p == 0 || p < 0x100)
@@ -67,13 +53,15 @@ public:
                 handle_hci_command(ctx, p, 3u + ctx.mmu.read8(p + 2));
                 break;
             }
+            if (req.req_addr != 0) {
+                ctx.mmu.write32(req.req_addr + 4, 0); // IPC_OK
+                nwii::runtime::hw::ipc_post_reply(req.req_addr);
+                return IPC_NO_REPLY;
+            }
             return IPC_OK;
         }
 
         case USBV0_INTRMSG: {
-
-            
-            
             if (!m_events.empty()) {
                 int32_t n = deliver_event(ctx, out_ptr, out_len);
                 if (req.req_addr != 0) {
@@ -91,8 +79,6 @@ public:
         }
 
         case USBV0_BLKMSG: {
-
-            
             uint8_t ep = endpoint_of(ctx, req);
             if ((ep & 0x80) && req.req_addr != 0)
                 return IPC_NO_REPLY;
@@ -123,13 +109,11 @@ private:
         std::cout << "[USB] HCI command opcode 0x" << std::hex << opcode
                   << std::dec << std::endl;
 
-        
         if ((opcode >> 10) == 0x01)
             m_events.push_back(make_command_status(opcode));
         else
             m_events.push_back(make_command_complete(opcode));
 
-        
         if (!m_pending_intr.empty()) {
             PendingRead pr = m_pending_intr.front();
             m_pending_intr.pop_front();
@@ -162,7 +146,6 @@ private:
                 (uint8_t)(opcode & 0xFF), (uint8_t)(opcode >> 8)};
     }
 
-    
     static std::vector<uint8_t> make_command_complete(uint16_t opcode) {
         std::vector<uint8_t> ret = return_parameters(opcode);
         std::vector<uint8_t> e = {HCI_EVT_COMMAND_COMPLETE,
