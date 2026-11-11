@@ -47,9 +47,15 @@ struct TexStage {
   uint32_t height;
   uint8_t format;
 
-  
+
   uint32_t tlut_offset;
   uint8_t tlut_format;
+
+  // Wrap modes from the BP tile descriptor (TexMode0): 0 = clamp, 1 = repeat,
+  // 2 = mirror. GX defaults to clamp; leaving the GL sampler at its default
+  // (GL_REPEAT) tiles the texture across every quad whose UVs leave [0,1].
+  uint8_t wrap_s = 0;
+  uint8_t wrap_t = 0;
 };
 
 

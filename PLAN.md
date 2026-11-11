@@ -390,3 +390,24 @@ run, and the game still has not reached the main menu.
 addresses: it drops draws whose stage-0 texture is 640x480 RGB565, which is what
 both wrist-strap pages are. Use it to watch what the game renders underneath
 (`NWII_SKIP_VIDEOS=1 NWII_SKIP_STRAP=1 ./RaymanOrigins <game>`).
+
+### Texture wrap modes were ignored
+
+The BP tile descriptor (TexMode0, BP 0x80-0x87) carries `wrap_s`/`wrap_t`, and the
+parser did not read it at all -- so every texture was sampled with the GL default,
+`GL_REPEAT`, whatever the game asked for. It now reads bits 0-1 / 2-3 and the
+renderer sets `GL_CLAMP_TO_EDGE` / `GL_REPEAT` / `GL_MIRRORED_REPEAT` per bound
+stage.
+
+A histogram of the stream puts this in perspective: the game asks for
+repeat/repeat on ~2000 draws and clamp on 146. So the default happened to be right
+most of the time and this fix does **not** explain the tiled look of the loading
+frames -- that is what the game asked for. It matters for the 146 clamp cases.
+
+### Caveat on the "loading screen"
+
+The butterfly frame recorded earlier is **not** verified correct. It appeared in a
+single sampled frame surrounded by flat frames, and the artwork is repeated in a
+grid, which is what a texture atlas tiled across a quad looks like. Treat it as
+"the texture path can put real artwork on screen", not as "the game's loading
+screen renders correctly". No reference capture exists to compare against.

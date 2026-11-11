@@ -160,6 +160,13 @@ namespace {
                 s.alphaScale  = (val >> 20) & 0x3;
                 s.alphaRegId  = (val >> 22) & 0x3;
             }
+        } else if (reg >= 0x80 && reg <= 0x87) {
+            // TexMode0 for tiles 0-7: wrap_s at bits 0-1, wrap_t at bits 2-3
+            // (Dolphin BPMemory TexMode0). GX has no default of its own here --
+            // the game always sets it -- and the hardware default is clamp.
+            int idx = reg - 0x80;
+            g_state.texStages[idx].wrap_s = (uint8_t)(val & 3);
+            g_state.texStages[idx].wrap_t = (uint8_t)((val >> 2) & 3);
         } else if ((reg >= 0x88 && reg <= 0x8B) || (reg >= 0xA8 && reg <= 0xAB)) {
             
             // 10-19, format bits 20-23 (Dolphin BPMemory TexImage0).

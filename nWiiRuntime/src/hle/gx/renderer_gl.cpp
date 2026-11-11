@@ -859,6 +859,15 @@ public:
             }
             glActiveTexture(GL_TEXTURE0 + i);
             glBindTexture(GL_TEXTURE_2D, want);
+            // Wrap comes from the GX tile descriptor, not from the texture. GL
+            // defaults to REPEAT, so a quad whose UVs leave [0,1] tiles the
+            // texture across the whole screen instead of clamping to the edge.
+            static GLint wrap_map[3] = {GL_CLAMP_TO_EDGE, GL_REPEAT,
+                                        GL_MIRRORED_REPEAT};
+            GLint ws = wrap_map[stage.wrap_s < 3 ? stage.wrap_s : 0];
+            GLint wt = wrap_map[stage.wrap_t < 3 ? stage.wrap_t : 0];
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
           }
         }
         DrawPrimitive(cmd);
