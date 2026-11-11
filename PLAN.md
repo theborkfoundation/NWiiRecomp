@@ -100,3 +100,51 @@ When user reported input not working, analysis of the game's internal disassembl
 - **Git Commit**: `d900ca5` in `NWiiRecomp` repository.
 - **Rendering & Audio**: Active 60 FPS graphics rendering confirmed (`efb_nonblack=307196/307200`, 533 draws in 5 seconds).
 - **Input Responsiveness**: Both Keyboard/Mouse and Gamepad fully functional in menus, strap screens, and gameplay.
+
+---
+
+## 5. Runtime Diagnostics
+
+The runtime now reports what it *discards*, not just what it renders. Every bug
+found in the GX path so far was silent: a rejected display list, a shader that
+failed to link, and a mis-sized draw payload all looked identical to "the game is
+slow" or "the screen is wrong".
+
+### Always on
+
+* **Counters** (`include/runtime/diagnostics.h`). Every path that drops
+  game-visible work increments one: `dl.rejected`, `fifo.bad_continuation`,
+  `fifo.unknown_opcode`, `fifo.resync_bytes`, `fifo.vsize_repaired`,
+  `shader.compile_failed`, `shader.link_failed`, `draw.skipped_no_shader`,
+  `tex.unknown_format`, `frame.carry_without_end`, `wgp.redirected_bytes`.
+* **`[DIAG]` summary** in the 5-second `[STAT]` block whenever any counter is
+  non-zero, plus a louder `*** N error-class events across: ...` line. A clean
+  run prints nothing.
+* **Stuck-picture detector**: three consecutive periods with an identical
+  framebuffer hash prints `*** picture unchanged for 15s`.
+* **Exit summary**, and `NWII_STRICT=1` makes the process exit `3` when any
+  error-class counter is non-zero, so scripted runs are pass/fail.
+
+### The invariant that matters
+
+`fifo.bad_continuation` fires when an accepted command's payload does not end on
+another command. That is exactly what a GX framing bug looks like from outside,
+and it names the culprit:
+
+```
+[DIAG] fifo.bad_continuation x3: cmd 0x90 at 0x1423 sized 8451 -> next byte 0xFF is not a command
+```
+
+i.e. "the draw at 0x1423 was given 8451 bytes and the stream does not resume with
+a command there" -- the vertex size (VAT/VCD state) disagrees with the stream.
+
+### Kicking it
+
+```sh
+NWII_DIAG=info ./RaymanOrigins <game>     # rate-limited detail lines
+NWII_STRICT=1 ./RaymanOrigins <game>      # exit 3 on discarded work
+tools/nwii_run.sh 20 /tmp/run.log ./RaymanOrigins <game>   # bounded, summary on stderr
+```
+
+`tools/nwii_run.sh` always kills with SIGKILL: the guest can leave `SIGALRM`
+undelivered, so `alarm(2)`/`timeout(1)` are not reliable bounds here.

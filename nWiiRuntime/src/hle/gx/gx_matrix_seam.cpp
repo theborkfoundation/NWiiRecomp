@@ -18,7 +18,24 @@ using nwii::runtime::CPUContext;
 
 namespace {
 
+// NWII_SEAM_NOEMIT: diagnostic switch, see gx_state_seam.cpp. Here it writes the
+// matrix into the shadow bank instead of the FIFO.
+bool seam_noemit() {
+  static const bool on = []() {
+    const char *e = std::getenv("NWII_SEAM_NOEMIT");
+    return e && e[0] == '1';
+  }();
+  return on;
+}
+
 void XFLoad(CPUContext &ctx, uint16_t addr, uint16_t count, uint32_t src) {
+  if (seam_noemit()) {
+    auto &st = nwii::runtime::gx::g_state;
+    uint16_t a = addr & 0xFFF;
+    for (uint16_t i = 0; i < count && (uint32_t)(a + i) < 256u; ++i)
+      st.xf[a + i] = ctx.mmu.read32(src + i * 4);
+    return;
+  }
   nwii::runtime::GX_WGPIPE_Write8(0x10);
   nwii::runtime::GX_WGPIPE_Write16(count - 1);
   nwii::runtime::GX_WGPIPE_Write16(addr);

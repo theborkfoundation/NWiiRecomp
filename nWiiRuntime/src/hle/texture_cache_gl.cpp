@@ -1,6 +1,9 @@
 #include "runtime/texture_cache_gl.h"
+#include "runtime/diagnostics.h"
 #include <iostream>
 #include <cstring>
+#include <cstdio>
+#include <vector>
 
 // GX texture decoding, kept bit-exact with Dolphin's TextureDecoder:
 
@@ -40,6 +43,75 @@ static inline uint8_t c6to8(uint32_t v) { return (uint8_t)((v << 2) | (v >> 4));
 static inline uint8_t c4to8(uint32_t v) { return (uint8_t)((v << 4) | v); }
 static inline uint8_t c3to8(uint32_t v) { return (uint8_t)((v << 5) | (v << 2) | (v >> 1)); }
 
+// Diagnostics: NWII_TEXDUMP=<prefix> writes the decoded RGBA images to disk so
+// a wrong texture can be told apart from wrong geometry. 32-bit BMP, bottom-up.
+namespace {
+
+void dump_bmp32(const char *path, int w, int h, const Color *px) {
+    FILE *f = std::fopen(path, "wb");
+    if (!f)
+        return;
+    uint8_t hdr[54] = {0};
+    uint32_t img_bytes = (uint32_t)w * (uint32_t)h * 4u;
+    uint32_t file_bytes = 54u + img_bytes;
+    hdr[0] = 'B'; hdr[1] = 'M';
+    std::memcpy(&hdr[2], &file_bytes, 4);
+    uint32_t off = 54; std::memcpy(&hdr[10], &off, 4);
+    uint32_t ihs = 40; std::memcpy(&hdr[14], &ihs, 4);
+    std::memcpy(&hdr[18], &w, 4);
+    std::memcpy(&hdr[22], &h, 4);
+    uint16_t planes = 1, bpp = 32; uint32_t comp = 0;
+    std::memcpy(&hdr[26], &planes, 2);
+    std::memcpy(&hdr[28], &bpp, 2);
+    std::memcpy(&hdr[30], &comp, 4);
+    std::memcpy(&hdr[34], &img_bytes, 4);
+    std::fwrite(hdr, 1, 54, f);
+    std::vector<uint8_t> row((size_t)w * 4u);
+    for (int y = h - 1; y >= 0; --y) {
+        for (int x = 0; x < w; ++x) {
+            const Color &c = px[(size_t)y * w + x];
+            row[(size_t)x * 4 + 0] = c.b;
+            row[(size_t)x * 4 + 1] = c.g;
+            row[(size_t)x * 4 + 2] = c.r;
+            row[(size_t)x * 4 + 3] = c.a;
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+}
+
+bool texdump_enabled() {
+    static const char *p = std::getenv("NWII_TEXDUMP");
+    return p && p[0];
+}
+
+// Returns a monotonically increasing call index. Files are written to a fixed
+// ring of slots so a long run keeps the most recent textures, not the boot ones.
+int next_dump_index() {
+    static int n = 0;
+    return n++;
+}
+
+void summarize(const char *kind, const gx::TexStage &stage, GLuint tex, const Color *px,
+               uint32_t w, uint32_t h) {
+    static int calls = 0;
+    uint32_t hash = 2166136261u, nz = 0;
+    if (px) {
+        for (uint32_t i = 0; i < w * h; ++i) {
+            uint32_t v;
+            std::memcpy(&v, &px[i], 4);
+            hash = (hash ^ v) * 16777619u;
+            if (v & 0x00FFFFFFu)
+                ++nz;
+        }
+    }
+    printf("[TEX] n=%d %s base=%08X %ux%u fmt=%u tex=%u hash=%08X opaque=%u/%u\n",
+           calls++, kind, stage.base_addr, stage.width, stage.height, stage.format, tex,
+           hash, nz, w * h);
+}
+
+} // namespace
+
 uint32_t texture_data_size(uint32_t width, uint32_t height, uint32_t format) {
     uint32_t tw, th, bpp;
     switch ((TextureFormat)format) {
@@ -62,8 +134,23 @@ uint32_t texture_data_size(uint32_t width, uint32_t height, uint32_t format) {
 }
 
 GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
-    if (GLuint efb = find_efb_texture(stage.base_addr))
+    if (GLuint efb = find_efb_texture(stage.base_addr)) {
+        if (texdump_enabled()) {
+            std::vector<Color> px((size_t)stage.width * stage.height);
+            glBindTexture(GL_TEXTURE_2D, efb);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            summarize("efb", stage, efb, px.data(), stage.width, stage.height);
+            int idx = next_dump_index();
+            if (idx >= 0) {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s_%02d_efb_%08X_%ux%u.bmp",
+                              std::getenv("NWII_TEXDUMP"), idx % 40, stage.base_addr,
+                              stage.width, stage.height);
+                dump_bmp32(path, (int)stage.width, (int)stage.height, px.data());
+            }
+        }
         return efb;
+    }
     uint32_t size = texture_data_size(stage.width, stage.height, stage.format);
     uint32_t stride = size > 32 * 4096 ? size / 4096 : 32;
     uint32_t hash = 2166136261u;
@@ -119,6 +206,17 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
         clear();
 
     Image img = decode_texture(ctx, stage);
+    if (texdump_enabled()) {
+        summarize("dec", stage, 0, (const Color *)img.data, stage.width, stage.height);
+        int idx = next_dump_index();
+        if (idx >= 0) {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s_%02d_dec_%08X_%ux%u_f%u.bmp",
+                          std::getenv("NWII_TEXDUMP"), idx % 40, stage.base_addr,
+                          stage.width, stage.height, stage.format);
+            dump_bmp32(path, (int)stage.width, (int)stage.height, (const Color *)img.data);
+        }
+    }
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -149,11 +247,18 @@ Image TextureCache::decode_texture(CPUContext& ctx, const gx::TexStage& stage) {
         case TextureFormat::C8:
         case TextureFormat::C14X2:  decode_paletted(ctx, stage, pixels); break;
         case TextureFormat::CMPR:   decode_cmpr(ctx, addr, width, height, pixels); break;
-        default:
-            std::cout << "[TextureCache] Unknown texture format: "
-                      << (int)stage.format << std::endl;
+        default: {
+            static const int kSlot =
+                NWII_DIAG_SLOT("tex.unknown_format", diag::Kind::Error);
+            char d[128];
+            std::snprintf(d, sizeof(d),
+                          "format %d at 0x%08X %ux%u -> magenta",
+                          (int)stage.format, stage.base_addr, stage.width,
+                          stage.height);
+            diag::fail(kSlot, d, 3);
             for (uint32_t i = 0; i < width * height; i++) pixels[i] = MAGENTA;
             break;
+        }
     }
 
     return img;

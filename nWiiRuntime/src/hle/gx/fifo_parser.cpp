@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include "runtime/gx/fifo_parser.h"
+#include "runtime/diagnostics.h"
 #include "runtime/gx_state.h"
 #include "runtime/cpu_context.h"
 #include "runtime/hw/hw.h"
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <chrono>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <algorithm>
 
@@ -18,6 +20,24 @@ namespace nwii::runtime {
 }
 
 namespace nwii::runtime::gx {
+
+namespace {
+
+// Audit counters for the FIFO interpreter. These are the checks that turn a GX
+// framing bug from "the screen looks wrong" into a named, counted event:
+//
+//   fifo.bad_continuation  a command was accepted whose payload does not end on
+//                          another command -- i.e. the size we used is wrong.
+//   fifo.unknown_opcode    a byte we cannot decode; recovery skipped it.
+//   fifo.resync_bytes      bytes discarded to recover framing.
+//   fifo.vsize_repaired    a draw whose vertex size was re-derived from the
+//                          stream because the VAT disagreed with it.
+const int kSlotBadCont = NWII_DIAG_SLOT("fifo.bad_continuation", diag::Kind::Error);
+const int kSlotUnknown = NWII_DIAG_SLOT("fifo.unknown_opcode", diag::Kind::Warn);
+const int kSlotResync = NWII_DIAG_SLOT("fifo.resync_bytes", diag::Kind::Error);
+const int kSlotVsizeFix = NWII_DIAG_SLOT("fifo.vsize_repaired", diag::Kind::Warn);
+
+} // namespace
 
 extern GXState g_state;
 
@@ -553,9 +573,33 @@ static uint64_t DLStateHash() {
 static void ExpandDisplayList(uint32_t addr, uint32_t size,
                               std::vector<GXCommand>& commands, int depth) {
     uint32_t phys = addr & 0x1FFFFFFF;
+    // Display lists may live in either MEM1 or MEM2. This engine keeps its
+    // command buffers in MEM2 (the same buffers it hands to the PI FIFO), so a
+    // MEM1-only bound check silently dropped whole lists and their draws.
+    const uint64_t end = (uint64_t)phys + size;
+    const bool in_mem1 = end <= 0x01800000ull;
+    const bool in_mem2 = phys >= 0x10000000u && end <= 0x14000000ull;
     if (!nwii::runtime::g_mmu || size == 0 || size > 0x400000 ||
-        phys + size > 0x01800000 || depth >= 4)
+        (!in_mem1 && !in_mem2) || depth >= 4) {
+        // A refused display list is silently-lost geometry: count it so it cannot
+        // hide behind an otherwise plausible-looking frame. An empty list is a
+        // legal no-op and must not be reported as an error, or the counters cry
+        // wolf and stop being trusted.
+        if (size == 0) {
+            static const int kEmpty =
+                NWII_DIAG_SLOT("dl.empty", diag::Kind::Info);
+            diag::bump(kEmpty);
+        } else {
+            static const int kSlot =
+                NWII_DIAG_SLOT("dl.rejected", diag::Kind::Error);
+            char d[128];
+            std::snprintf(d, sizeof(d),
+                          "list addr=0x%08X size=%u depth=%d (mem1=%d mem2=%d)",
+                          addr, size, depth, (int)in_mem1, (int)in_mem2);
+            diag::fail(kSlot, d);
+        }
         return;
+    }
     g_prof_dl_calls++;
     g_prof_dl_bytes += size;
     auto dl0 = std::chrono::steady_clock::now();
@@ -843,10 +887,227 @@ void FifoParser::Parse(std::vector<uint8_t>& fifo, std::vector<GXCommand>& comma
         fifo.erase(fifo.begin(), fifo.begin() + offset);
 }
 
+// Byte size of a well-formed command at `off`, or 0 when the bytes there do not
+// form one. Used only to recover from a lost frame, so it is deliberately
+// strict: anything questionable is rejected rather than guessed at.
+static size_t CommandSizeAt(const std::vector<uint8_t>& f, size_t off) {
+    const size_t n = f.size();
+    if (off >= n) return 0;
+    const uint8_t cmd = f[off];
+    switch (cmd) {
+    case 0x61:
+        return (off + 5 <= n) ? 5 : 0;
+    case 0x08:
+        return (off + 6 <= n) ? 6 : 0;
+    case 0x20: case 0x28: case 0x30: case 0x38:
+        return (off + 5 <= n) ? 5 : 0;
+    case 0x40:
+        return (off + 9 <= n) ? 9 : 0;
+    case 0x48:
+        return 1;
+    case 0x78: {
+        // Seam read-modify-write marker: kind, reg, mask, value.
+        if (off + 11 > n) return 0;
+        return (f[off + 1] <= 1) ? 11 : 0;
+    }
+    case 0x10: {
+        if (off + 5 > n) return 0;
+        size_t total = 5 + ((size_t)((f[off + 1] << 8) | f[off + 2]) + 1) * 4;
+        return (off + total <= n) ? total : 0;
+    }
+    default:
+        break;
+    }
+    if (cmd >= 0x80 && cmd <= 0xB7) {
+        if (off + 3 > n) return 0;
+        uint16_t count = (uint16_t)((f[off + 1] << 8) | f[off + 2]);
+        size_t need = 3 + (size_t)count * VertexSize(g_state.vat[cmd & 0x07]);
+        return (off + need <= n) ? need : 0;
+    }
+    return 0;
+}
+
+// Is `cmd` one of the unambiguous state-write opcodes? Float vertex data can
+// accidentally look like a draw opcode, but it practically never forms a
+// well-framed BP/CP/XF write followed by another command.
+static bool IsStateOpcode(uint8_t cmd) {
+    switch (cmd) {
+    case 0x61: case 0x08: case 0x10: case 0x40: case 0x78:
+    case 0x20: case 0x28: case 0x30: case 0x38:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// First offset >= `from` that looks like a real command boundary. A candidate is
+// only accepted when `chain` consecutive commands validate: float payloads can
+// accidentally look like one command, but not like a run of them.
+static size_t ResyncFrom(const std::vector<uint8_t>& f, size_t from,
+                         bool state_only, int chain) {
+    for (size_t p = from; p + 1 < f.size(); ++p) {
+        if (state_only && !IsStateOpcode(f[p])) continue;
+        size_t q = p;
+        bool ok = true;
+        for (int k = 0; k < chain; ++k) {
+            size_t s = CommandSizeAt(f, q);
+            if (!s) { ok = false; break; }
+            q += s;
+            if (q >= f.size()) {
+                // Ran out of buffer mid-chain: accept only if the last command
+                // ended exactly at the end.
+                ok = (q == f.size() && k + 1 >= 2);
+                break;
+            }
+        }
+        if (ok) return p;
+    }
+    return (size_t)-1;
+}
+
+// First CP->XFB copy (BP 0x52 with PE_COPY_EXECUTE), which is what ends a
+// frame. Resyncing here keeps the frame structure intact: the renderer drops
+// draws that arrive without a frame edge, so swallowing one turns the screen
+// black even when the commands around it are fine.
+static size_t ResyncToFrameEdge(const std::vector<uint8_t>& f, size_t from) {
+    const size_t limit = std::min(f.size(), from + (size_t)(256u << 10));
+    for (size_t p = from; p + 5 <= limit; ++p) {
+        if (f[p] != 0x61 || f[p + 1] != 0x52) continue;
+        uint32_t val = ((uint32_t)f[p + 2] << 16) | ((uint32_t)f[p + 3] << 8) |
+                       (uint32_t)f[p + 4];
+        if (val & 0x4000) return p;
+    }
+    return (size_t)-1;
+}
+
+/**
+ * Does the stream continue like a command at `p`? Used to tell a correctly
+ * sized draw payload from an over/under-consumed one.
+ */
+static bool NextLooksLikeCommand(const std::vector<uint8_t>& f, size_t p) {
+    if (p >= f.size()) return true; // end of buffer: nothing to contradict us
+    uint8_t c = f[p];
+    if (c == 0x00 || c == 0x44 || c == 0x48) return true; // NOP-ish opcodes
+    return CommandSizeAt(f, p) != 0;
+}
+
+// Vertex-size repair.
+//
+// The VAT is global state, so if a single CP 0x50/0x60 (VCD) write is missed or
+// arrives late, every following draw is sized against a stale format and the
+// whole stream desyncs. The stream itself still says how big the payload is: the
+// next command must start right after it. So when the draw's current size lands
+// on something that is not a command, try the other plausible strides and adopt
+// the one whose continuation reads as a command.
+static size_t RepairVertexSize(const std::vector<uint8_t>& f, size_t offset,
+                               uint16_t count, size_t expected) {
+    static const size_t kStrides[] = {6, 8, 12, 16, 20, 24, 28, 32,
+                                      36, 40, 44, 48, 56, 64};
+    size_t best = expected;
+    size_t best_dist = (size_t)-1;
+    for (size_t vs : kStrides) {
+        if (vs == expected) continue;
+        size_t need = 3 + (size_t)count * vs;
+        if (offset + need > f.size()) continue;
+        size_t q = offset + need;
+        // A draw payload is followed by the next draw's state setup, so require
+        // an unambiguous state write -- and a second one behind it. float payload
+        // bytes can fake one command, not a burst of BP/XF writes.
+        if (q >= f.size() || !IsStateOpcode(f[q])) continue;
+        size_t s1 = CommandSizeAt(f, q);
+        if (!s1 || q + s1 >= f.size() || !IsStateOpcode(f[q + s1])) continue;
+        size_t dist = vs > expected ? vs - expected : expected - vs;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = vs;
+        }
+    }
+    return best;
+}
+
 static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::vector<GXCommand>& commands, int depth) {
     const size_t fifo_size = fifo.size();
+
+    // Per-call command trace, only materialised when a bogus draw shows up, so
+    // the sequence that produced it can be read back verbatim.
+    static std::vector<std::string> s_trace;
+    if (depth == 0 && offset == 0)
+        s_trace.clear();
+
+    // Persistent history of the last non-NOP commands, across ticks. The parser
+    // erases consumed bytes and can stall at offset 0, so the per-call trace is
+    // empty exactly when the context is most needed.
+    static std::string s_hist[24];
+    static int s_hist_n = 0;
+    static void (*s_dummy)() = nullptr;
+    (void)s_dummy;
+
+    // Diagnostic ring: the last commands with their consumed byte counts, so a
+    // desync can be attributed to the command that over/under-ran.
+    struct TraceEnt { size_t off; uint8_t cmd; size_t len; };
+    static TraceEnt trace_ring[12] = {};
+    static int trace_ring_n = 0;
+    static size_t trace_prev_off = (size_t)-1;
+    static uint8_t trace_prev_cmd = 0;
+    static int trace_prev_depth = 0;
+
     while (offset < fifo_size) {
         uint8_t cmd = fifo[offset];
+
+        if (trace_prev_off != (size_t)-1 && depth == trace_prev_depth &&
+            offset > trace_prev_off) {
+            trace_ring[trace_ring_n % 12] = {trace_prev_off, trace_prev_cmd,
+                                             offset - trace_prev_off};
+            ++trace_ring_n;
+
+            // Continuation invariant: the command that just ended must be
+            // followed by another command. Only checked with real lookahead, so
+            // a buffer that is merely truncated mid-frame is not reported.
+            const size_t span = offset - trace_prev_off;
+            if (fifo_size >= offset + 64) {
+                const uint8_t nb = fifo[offset];
+                const bool nopish = (nb == 0x00 || nb == 0x44 || nb == 0x48);
+                if (!nopish && CommandSizeAt(fifo, offset) == 0) {
+                    char d[160];
+                    std::snprintf(d, sizeof(d),
+                                  "cmd 0x%02X at 0x%zX sized %zu -> next byte 0x%02X "
+                                  "is not a command",
+                                  trace_prev_cmd, trace_prev_off, span, nb);
+                    diag::fail(kSlotBadCont, d);
+                }
+            }
+        }
+        trace_prev_off = offset;
+        trace_prev_cmd = cmd;
+        trace_prev_depth = depth;
+
+        if (s_trace.size() < 4000) {
+            char line[96];
+            std::snprintf(line, sizeof(line), "off=%zu cmd=%02X %02X %02X %02X",
+                          offset, cmd, fifo[offset + 1],
+                          offset + 2 < fifo_size ? fifo[offset + 2] : 0,
+                          offset + 3 < fifo_size ? fifo[offset + 3] : 0);
+            s_trace.push_back(line);
+        }
+        if (cmd != 0x00) {
+            char hl[96];
+            std::snprintf(hl, sizeof(hl), "%zu:%02X %02X %02X %02X %02X %02X",
+                          offset, cmd, fifo[offset + 1],
+                          offset + 2 < fifo_size ? fifo[offset + 2] : 0,
+                          offset + 3 < fifo_size ? fifo[offset + 3] : 0,
+                          offset + 4 < fifo_size ? fifo[offset + 4] : 0,
+                          offset + 5 < fifo_size ? fifo[offset + 5] : 0);
+            s_hist[s_hist_n % 24] = hl;
+            ++s_hist_n;
+        }
+
+        static const bool ftrace_any = std::getenv("NWII_FIFOTRACE") != nullptr;
+        static int ftrace_any_n = 0;
+        if (ftrace_any && ftrace_any_n < 400 && cmd < 0x80 && cmd != 0x00)
+            printf("[FT %03d] off=%zu cmd=%02X argc=%02X %02X %02X\n",
+                   ftrace_any_n++, offset, cmd, fifo[offset + 1],
+                   offset + 2 < fifo_size ? fifo[offset + 2] : 0,
+                   offset + 3 < fifo_size ? fifo[offset + 3] : 0);
 
         if (cmd == 0x00) {
             
@@ -1043,11 +1304,49 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
 
             offset += total_size;
         } else if (cmd >= 0x80 && cmd <= 0xBF) {
-            
+
             if (offset + 3 > fifo_size) break;
 
             uint16_t vtx_count = (fifo[offset + 1] << 8) | fifo[offset + 2];
             uint8_t vat_idx = cmd & 0x07;
+
+            // NWII_FIFOTRACE: dump the front of the stream command-by-command so
+            // a desync can be bisected to the command that over/under-ran.
+            static const bool ftrace = std::getenv("NWII_FIFOTRACE") != nullptr;
+            static int ftrace_n = 0;
+            if (ftrace && ftrace_n < 400) {
+                printf("[FT %03d] draw off=%zu cmd=%02X vat=%u count=%u vsize=%zu |",
+                       ftrace_n++, offset, cmd, vat_idx, vtx_count,
+                       VertexSize(g_state.vat[vat_idx]));
+                for (size_t i = offset; i < fifo_size && i < offset + 20; ++i)
+                    printf(" %02X", fifo[i]);
+                printf("\n");
+            }
+            // A count this large cannot be a real draw; report the run that led
+            // here instead of guessing.
+            if (vtx_count > 4000) {
+                static int bad_n = 0;
+                printf("[FT-BAD %d] off=%zu buf=%zu cmd=%02X vat=%u count=%u vsize=%zu\n",
+                       bad_n++, offset, fifo_size, cmd, vat_idx, vtx_count,
+                       VertexSize(g_state.vat[vat_idx]));
+                if (bad_n <= 3) {
+                    size_t from = s_trace.size() > 90 ? s_trace.size() - 90 : 0;
+                    for (size_t i = from; i < s_trace.size(); ++i)
+                        printf("   %s\n", s_trace[i].c_str());
+                    printf("   --- hexdump ---\n");
+                    size_t hs = offset > 160 ? offset - 160 : 0;
+                    for (size_t i = hs; i < fifo_size && i < offset + 48; i += 16) {
+                        printf("   %04zu:", i);
+                        for (size_t k = i; k < fifo_size && k < i + 16; ++k)
+                            printf(" %02X", fifo[k]);
+                        printf("\n");
+                    }
+                    printf("   --- bad draw bytes:");
+                    for (size_t i = offset; i < fifo_size && i < offset + 16; ++i)
+                        printf(" %02X", fifo[i]);
+                    printf("\n");
+                }
+            }
 
             VATSlot& vat = g_state.vat[vat_idx];
 
@@ -1058,7 +1357,325 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             // only survivors is what keeps parse cost off the drain path.
             size_t vsize = VertexSize(vat);
             size_t need = 3 + (size_t)vtx_count * vsize;
-            if (offset + need > fifo_size) break; // incomplete: wait for more
+            // Repair a stale VAT: if this size lands on something that cannot be
+            // a command, the format we were told is wrong, and the stream itself
+            // knows better.
+            {
+                static const bool vsizefix = []() {
+                    const char *e = std::getenv("NWII_VSIZEFIX");
+                    return e && e[0] == '1';
+                }();
+                // Only repair when there is plenty of data behind the draw. Near
+                // the buffer end the following command merely has not arrived yet,
+                // which is not evidence of a wrong size.
+                if (vsizefix && depth == 0 && vtx_count <= 4096 &&
+                    offset + need <= fifo_size &&
+                    offset + need + 8192 <= fifo_size &&
+                    !NextLooksLikeCommand(fifo, offset + need)) {
+                    size_t fixed = RepairVertexSize(fifo, offset, vtx_count, vsize);
+                    if (fixed != vsize) {
+                        diag::bump(kSlotVsizeFix);
+                        static int s_fixes = 0;
+                        if (s_fixes++ < 12)
+                            printf("[GX] vsize repair at 0x%zX: count=%u %zu -> %zu "
+                                   "(vat tex0 mask=%d)\n",
+                                   offset, vtx_count, vsize, fixed,
+                                   (int)vat.texMask[0]);
+                        vsize = fixed;
+                        need = 3 + (size_t)vtx_count * vsize;
+                    }
+                }
+            }
+            if (offset + need > fifo_size) {
+                // Incomplete payload. Normally the GP simply has not written the
+                // rest yet, so wait for the next tick. But if this same position
+                // keeps failing while the buffer keeps growing, the opcode was
+                // misread (we lost framing upstream) and waiting will never
+                // help -- a bogus 16-bit count can demand hundreds of KB and
+                // jam the whole FIFO, freezing every command behind it. In that
+                // case step past the byte and rescan for the next command.
+                static size_t s_stall_off = (size_t)-1;
+                static int s_stall_ticks = 0;
+                // Only the main stream is retried across ticks. A display list is
+                // a self-contained buffer: if its tail is truncated there is
+                // nothing to wait for, and letting it drive the shared counter
+                // would resync the main stream spuriously.
+                if (depth > 0) break;
+                if (s_stall_off != offset) {
+                    s_stall_off = offset;
+                    s_stall_ticks = 0;
+                    // NWII_FINDMEM: search for the failing bytes in guest RAM on
+                    // the very first stall. If the engine builds this data in
+                    // memory and copies it out, the copy is still live now (four
+                    // ticks later it is usually overwritten) and the bytes just
+                    // before it in RAM reveal what the stream should contain.
+                    static const bool findmem =
+                        std::getenv("NWII_FINDMEM") != nullptr;
+                    static int s_found = 0;
+                    if (findmem && s_found < 6 && offset + 16 <= fifo_size &&
+                        nwii::runtime::g_mmu) {
+                        ++s_found;
+                        const uint8_t *sig = &fifo[offset];
+                        for (int region = 0; region < 2; ++region) {
+                            uint32_t rbase = region ? 0x10000000u : 0u;
+                            size_t rsize = region ? 0x04000000u : 0x01800000u;
+                            const uint8_t *p =
+                                nwii::runtime::g_mmu->get_ptr(0x80000000u | rbase);
+                            if (!p) continue;
+                            for (size_t i = 0; i + 16 < rsize; i += 4) {
+                                if (p[i] != sig[0] || p[i + 1] != sig[1] ||
+                                    p[i + 2] != sig[2] || p[i + 3] != sig[3])
+                                    continue;
+                                if (std::memcmp(p + i, sig, 16) != 0) continue;
+                                printf("[GXFIND] stall source %s+0x%zX:\n",
+                                       region ? "MEM2" : "MEM1", i);
+                                for (size_t k = (i > 64 ? i - 64 : 0); k < i + 32;
+                                     k += 16) {
+                                    printf("   %+5zd:", (ssize_t)k - (ssize_t)i);
+                                    for (size_t j = k; j < k + 16; ++j)
+                                        printf(" %02X", p[j]);
+                                    printf("\n");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } else if (++s_stall_ticks >= 4) {
+                    s_stall_off = (size_t)-1;
+                    s_stall_ticks = 0;
+                    // NWII_FINDMEM: if the bytes at the failure point also exist
+                    // in guest RAM, they are being copied into the FIFO from a
+                    // buffer -- and that buffer shows what the stream should have
+                    // contained (e.g. the draw header we seem to be missing).
+                    static const bool findmem =
+                        std::getenv("NWII_FINDMEM") != nullptr;
+                    static int s_found = 0;
+                    if (findmem && s_found < 3 && offset + 16 <= fifo_size &&
+                        nwii::runtime::g_mmu) {
+                        ++s_found;
+                        const uint8_t *sig = &fifo[offset];
+                        for (int region = 0; region < 2; ++region) {
+                            uint32_t rbase = region ? 0x10000000u : 0u;
+                            size_t rsize = region ? 0x04000000u : 0x01800000u;
+                            const uint8_t *p =
+                                nwii::runtime::g_mmu->get_ptr(0x80000000u | rbase);
+                            if (!p) continue;
+                            for (size_t i = 0; i + 16 < rsize; i += 4) {
+                                if (p[i] != sig[0] || p[i + 1] != sig[1] ||
+                                    p[i + 2] != sig[2] || p[i + 3] != sig[3])
+                                    continue;
+                                if (std::memcmp(p + i, sig, 16) != 0) continue;
+                                printf("[GXFIND] copy source %s+0x%zX:\n",
+                                       region ? "MEM2" : "MEM1", i);
+                                for (size_t k = (i > 64 ? i - 64 : 0); k < i + 32;
+                                     k += 16) {
+                                    printf("   %+5zd:", (ssize_t)k - (ssize_t)i);
+                                    for (size_t j = k; j < k + 16; ++j)
+                                        printf(" %02X", p[j]);
+                                    printf("\n");
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // How many consecutive commands must validate before a
+                    // resync point is trusted. A real state burst is long; a
+                    // coincidental match inside float data is not.
+                    static const int chain_len = []() {
+                        if (const char *e = std::getenv("NWII_RESYNC_CHAIN"))
+                            return std::atoi(e);
+                        return 3;
+                    }();
+                    // NWII_FINDCTR: the engine keeps its own FIFO byte counter
+                    // (obj+0x24, bumped by +4 per attribute and +8 per texcoord
+                    // pair). Locate it once by scanning for a dword just above the
+                    // number of bytes we have pushed, then report the delta at
+                    // every later desync: a constant delta means our byte
+                    // accounting matches the engine's, a drifting one means bytes
+                    // are being invented or lost.
+                    static const bool findctr =
+                        std::getenv("NWII_FINDCTR") != nullptr;
+                    static uint32_t s_ctr_phys = 0xFFFFFFFFu;
+                    static int s_ctr_msgs = 0;
+                    if (findctr && nwii::runtime::g_mmu) {
+                        uint64_t ours = nwii::runtime::GX_WGP_Count();
+                        if (s_ctr_phys == 0xFFFFFFFFu) {
+                            int best = 0x7FFFFFFF;
+                            for (int region = 0; region < 2; ++region) {
+                                uint32_t rbase = region ? 0x10000000u : 0u;
+                                uint32_t rsize = region ? 0x04000000u : 0x01800000u;
+                                const uint8_t *p =
+                                    nwii::runtime::g_mmu->get_ptr(0x80000000u | rbase);
+                                if (!p) continue;
+                                for (uint32_t i = 0; i + 4 < rsize; i += 4) {
+                                    uint32_t v = ((uint32_t)p[i] << 24) |
+                                                 ((uint32_t)p[i + 1] << 16) |
+                                                 ((uint32_t)p[i + 2] << 8) | p[i + 3];
+                                    if (v < ours || v > ours + 0x20000) continue;
+                                    if ((int)(v - ours) < best) {
+                                        best = (int)(v - ours);
+                                        s_ctr_phys = rbase + i;
+                                    }
+                                }
+                            }
+                            printf("[GXCTR] candidate counter at phys 0x%08X, ours=%llu "
+                                   "delta=%d\n",
+                                   s_ctr_phys, (unsigned long long)ours, best);
+                        } else {
+                            const uint8_t *p = nwii::runtime::g_mmu->get_ptr(
+                                0x80000000u | s_ctr_phys);
+                            if (p && s_ctr_msgs++ < 12) {
+                                uint32_t v = ((uint32_t)p[0] << 24) |
+                                             ((uint32_t)p[1] << 16) |
+                                             ((uint32_t)p[2] << 8) | p[3];
+                                printf("[GXCTR] engine=%u ours=%llu delta=%lld\n", v,
+                                       (unsigned long long)ours,
+                                       (long long)v - (long long)ours);
+                            }
+                        }
+                    }
+
+                    size_t resume = ResyncFrom(fifo, offset + 1, true, chain_len);
+                    const char *how = "state-chain";
+                    if (resume == (size_t)-1) {
+                        resume = ResyncFrom(fifo, offset + 1, true, 2);
+                        how = "state-chain2";
+                    }
+                    if (resume == (size_t)-1) {
+                        resume = ResyncFrom(fifo, offset + 1, false, 3);
+                        how = "any-chain3";
+                    }
+                    if (resume == (size_t)-1) {
+                        resume = ResyncToFrameEdge(fifo, offset + 1);
+                        how = "frame-edge";
+                    }
+                    if (resume == (size_t)-1) resume = fifo_size;
+                    if (resume > offset) diag::bump(kSlotResync, resume - offset);
+
+                    // NWII_SYNTH_DRAW: the engine streams a block of vertex data
+                    // here with no draw header of its own (the block is a whole
+                    // number of vertices and ends exactly where state writes
+                    // resume). Emit a strip for it so the geometry reaches the
+                    // renderer instead of being discarded with the desync.
+                    static const bool synth =
+                        std::getenv("NWII_SYNTH_DRAW") != nullptr;
+                    if (synth && resume > offset && resume <= fifo_size) {
+                        size_t len = resume - offset;
+                        // The block is raw float vertex data, but the VAT active at
+                        // that point describes index16 vertices. Decoding is driven
+                        // by the VAT, so a stride override alone still reads the
+                        // bytes as indices. Build the format the data actually has:
+                        // pos f32/XYZ + RGBA8 colour + tex f32/ST = 24 bytes.
+                        VATSlot sv = g_state.vat[vat_idx];
+                        if (std::getenv("NWII_SYNTH_DIRECT")) {
+                            std::memset(&sv, 0, sizeof(sv));
+                            sv.posMask = VtxAttrMask::Direct;
+                            sv.posType = VtxAttrType::F32;
+                            sv.posElements = true;
+                            sv.clrMask[0] = VtxAttrMask::Direct;
+                            sv.clrType[0] = (VtxAttrType)5; // RGBA8
+                            sv.texMask[0] = VtxAttrMask::Direct;
+                            sv.texType[0] = VtxAttrType::F32;
+                            sv.texElements[0] = true;
+                        }
+                        size_t vs = VertexSize(sv);
+                        if (const char *e = std::getenv("NWII_SYNTH_VSIZE")) {
+                            size_t v = (size_t)std::atoi(e);
+                            if (v) vs = v;
+                        }
+                        uint8_t prim = 0x90;
+                        if (const char *e = std::getenv("NWII_SYNTH_PRIM"))
+                            prim = (uint8_t)std::strtoul(e, nullptr, 0);
+                        size_t cnt = vs ? len / vs : 0;
+                        if (vs && len % vs == 0 && cnt >= 3 && cnt <= 0xFFFF) {
+                            GXCommand c;
+                            c.type = GXCommandType::DrawPrimitive;
+                            c.prim_type = prim;
+                            c.raw = std::make_shared<DrawRaw>();
+                            c.raw->vat = sv;
+                            c.raw->defPosMtxIdx = g_state.defPosMtxIdx;
+                            std::memcpy(c.raw->defTexMtxIdx,
+                                        g_state.defTexMtxIdx, 8);
+                            std::memcpy(c.raw->arrayBase, g_state.arrayBase,
+                                        sizeof(c.raw->arrayBase));
+                            std::memcpy(c.raw->arrayStride, g_state.arrayStride,
+                                        sizeof(c.raw->arrayStride));
+                            c.raw->need_normal = false;
+                            c.raw->count = (uint16_t)cnt;
+                            c.raw->bytes.assign(fifo.begin() + offset,
+                                                fifo.begin() + offset + cnt * vs);
+                            printf("[GX] synth draw at 0x%zX: %zu bytes -> %zu "
+                                   "verts (vsize=%zu)\n",
+                                   offset, len, cnt, vs);
+                            commands.push_back(std::move(c));
+                        }
+                    }
+                    static int s_resyncs = 0;
+                    if (s_resyncs++ < 8) {
+                        const VATSlot &sv = g_state.vat[vat_idx];
+                        printf("[GX] desync: cmd=%02X vat=%u count=%u vsize=%zu "
+                               "needs %zu bytes > %zu; resync(%s) %zu -> %zu "
+                               "[wgp exact=%llu off-page=%llu]\n",
+                               cmd, vat_idx, vtx_count, vsize, need,
+                               fifo_size - offset, how, offset, resume,
+                               (unsigned long long)nwii::runtime::g_wgp_addr_exact,
+                               (unsigned long long)nwii::runtime::g_wgp_addr_page);
+                        printf("   vat: posMask=%d posType=%d posElems=%d posMI=%d | "
+                               "nrmMask=%d nrmType=%d nrmElems=%d | "
+                               "clr0 mask=%d type=%d | "
+                               "tex0 mask=%d type=%d elems=%d\n",
+                               (int)sv.posMask, (int)sv.posType,
+                               (int)sv.posElements, (int)sv.posMatIdx,
+                               (int)sv.nrmMask, (int)sv.nrmType,
+                               (int)sv.nrmElements, (int)sv.clrMask[0],
+                               (int)sv.clrType[0], (int)sv.texMask[0],
+                               (int)sv.texType[0], (int)sv.texElements[0]);
+                        for (int ci = 1; ci < 2; ++ci)
+                            printf("   clr%d mask=%d type=%d\n", ci,
+                                   (int)sv.clrMask[ci], (int)sv.clrType[ci]);
+                        for (int t = 1; t < 8; ++t)
+                            if ((int)sv.texMask[t])
+                                printf("   tex%d mask=%d type=%d elems=%d\n", t,
+                                       (int)sv.texMask[t], (int)sv.texType[t],
+                                       (int)sv.texElements[t]);
+                        printf("   raw cp50=%08X cp60=%08X\n", g_state.cp[0x50],
+                               g_state.cp[0x60]);
+                        printf("   raw vat%u regs:", vat_idx);
+                        for (int r = 0; r < 8; ++r)
+                            printf(" %02X=%08X", 0x70 + r,
+                                   g_state.cp[0x70 + r]);
+                        printf("\n   raw vatB:");
+                        for (int r = 0; r < 4; ++r)
+                            printf(" %02X=%08X", 0x80 + r,
+                                   g_state.cp[0x80 + r]);
+                        printf("\n");
+                        if (s_resyncs <= 2) {
+                            printf("   wgp page offsets used: ");
+                            for (int b = 1; b < 1024 && b < 512; ++b)
+                                if (nwii::runtime::g_wgp_addr_hist[b])
+                                    printf("0x%03X:%u ", b * 4,
+                                           nwii::runtime::g_wgp_addr_hist[b]);
+                            printf("\n");
+                        }
+                        if (s_resyncs <= 3) {
+                            // Persistent non-NOP history: shows whether a display
+                            // list call (0x40) precedes the block, i.e. whether the
+                            // draw header lives inside a list we expand.
+                            printf("   history:");
+                            int n = s_hist_n < 24 ? s_hist_n : 24;
+                            for (int k = 0; k < n; ++k)
+                                printf(" [%s]",
+                                       s_hist[(s_hist_n - n + k) % 24].c_str());
+                            printf("\n");
+                        }
+                    }
+                    offset = resume;
+                    if (offset >= fifo_size) break;
+                    continue;
+                }
+                break; // incomplete: wait for more
+            }
 
             auto sn0 = std::chrono::steady_clock::now();
             GXCommand c;
@@ -1158,12 +1775,58 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             g_prof_draws++;
             g_prof_draw_bytes += need;
 
+            // NWII_VATLOG: correlate the raw VAT descriptor dwords with the draw
+            // that is about to consume them, so the field layout can be derived
+            // from geometry whose size is known independently.
+            static const bool vatlog = std::getenv("NWII_VATLOG") != nullptr;
+            static int vatlog_n = 0;
+            if (vatlog && vatlog_n < 120) {
+                ++vatlog_n;
+                printf("[VATLOG %3d] off=%zu op=%02X vat=%u count=%u vsize=%zu "
+                       "cp50=%08X cp60=%08X A=%08X B=%08X C=%08X\n",
+                       vatlog_n, offset, cmd, vat_idx, vtx_count, vsize,
+                       g_state.cp[0x50], g_state.cp[0x60],
+                       g_state.cp[0x70 + vat_idx],
+                       g_state.cp[0x80 + vat_idx],
+                       g_state.cp[0x90 + vat_idx]);
+            }
+
             commands.push_back(std::move(c));
             offset += need;
             g_prof_snap_us += std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - sn0).count();
         } else {
             g_prof_unknown++;
+            diag::bump(kSlotUnknown);
+            // NWII_DESYNC_CTX: the byte just past a command that was sized
+            // wrongly is the first one that is not a plausible opcode. Report
+            // that command -- its opcode, the size we consumed and the run that
+            // led to it -- so the mis-sizing (not its fallout) is identified.
+            static const bool desync_ctx =
+                std::getenv("NWII_DESYNC_CTX") != nullptr;
+            if (desync_ctx) {
+                static int shown = 0;
+                if (shown++ < 6) {
+                    printf("[DESYNC-CTX %d] unknown opcode 0x%02X at 0x%zX:",
+                           shown, cmd, offset);
+                    int n = trace_ring_n < 6 ? trace_ring_n : 6;
+                    for (int k = 0; k < n; ++k) {
+                        const TraceEnt &e =
+                            trace_ring[(trace_ring_n - n + k) % 12];
+                        printf(" [0x%zX op=%02X len=%zu]", e.off, e.cmd, e.len);
+                    }
+                    printf("\n");
+                    if (n > 0) {
+                        const TraceEnt &e =
+                            trace_ring[(trace_ring_n - 1) % 12];
+                        printf("   last cmd op=%02X at 0x%zX len=%zu bytes:", e.cmd,
+                               e.off, e.len);
+                        for (size_t i = e.off; i < fifo_size && i < e.off + 24; ++i)
+                            printf(" %02X", fifo[i]);
+                        printf("\n");
+                    }
+                }
+            }
             // NWII_DESYNC: histogram the byte the parser can't recognise, plus
             // the 3 bytes before it (where the previous command over/under-ran).
             static const bool desync = std::getenv("NWII_DESYNC") != nullptr;

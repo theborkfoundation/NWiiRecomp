@@ -14,7 +14,24 @@ using nwii::runtime::CPUContext;
 
 namespace {
 
+// NWII_SEAM_NOEMIT: diagnostic switch. When set, the seam stops injecting bytes
+// into the FIFO and merges into the shadow state directly instead. That makes it
+// possible to tell whether OUR injected commands are what desyncs the stream in
+// a given title. Not correct in general (the merge races the parser), which is
+// why it stays opt-in.
+bool seam_noemit() {
+  static const bool on = []() {
+    const char *e = std::getenv("NWII_SEAM_NOEMIT");
+    return e && e[0] == '1';
+  }();
+  return on;
+}
+
 void BPWrite(uint8_t reg, uint32_t val) {
+  if (seam_noemit()) {
+    nwii::runtime::gx::g_state.bp[reg] = val;
+    return;
+  }
   nwii::runtime::GX_WGPIPE_Write8(0x61);
   nwii::runtime::GX_WGPIPE_Write8(reg);
   nwii::runtime::GX_WGPIPE_Write8((val >> 16) & 0xFF);
@@ -24,6 +41,15 @@ void BPWrite(uint8_t reg, uint32_t val) {
 
 // kind 0 = BP register, 1 = CP register.
 void RMWWrite(uint8_t kind, uint8_t reg, uint32_t mask, uint32_t val) {
+  if (seam_noemit()) {
+    if (kind == 0)
+      nwii::runtime::gx::g_state.bp[reg] =
+          (nwii::runtime::gx::g_state.bp[reg] & ~mask) | (val & mask);
+    else
+      nwii::runtime::gx::g_state.cp[reg] =
+          (nwii::runtime::gx::g_state.cp[reg] & ~mask) | (val & mask);
+    return;
+  }
   nwii::runtime::GX_WGPIPE_Write8(0x78);
   nwii::runtime::GX_WGPIPE_Write8(kind);
   nwii::runtime::GX_WGPIPE_Write8(reg);

@@ -1,4 +1,5 @@
 #include "runtime/cpu_context.h"
+#include "runtime/diagnostics.h"
 #include "runtime/gx/fifo_parser.h"
 #include "runtime/gx/renderer.h"
 #include "runtime/gx/tev_shader_gen.h"
@@ -62,10 +63,47 @@ static GLuint CompileShader(const char *vs, const char *fs) {
   glShaderSource(f, 1, &fs, nullptr);
   glCompileShader(f);
 
+  // The generated shaders are #version 330; a 3.2-core context only accepts
+  // GLSL 1.50. Surface that loudly instead of drawing with a dead program.
+  static int s_shader_errors = 0;
+  for (int i = 0; i < 2; ++i) {
+    GLuint s = i ? f : v;
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok && s_shader_errors < 3) {
+      ++s_shader_errors;
+      char log[2048] = {0};
+      glGetShaderInfoLog(s, sizeof(log) - 1, nullptr, log);
+      std::cerr << "[GX] " << (i ? "fragment" : "vertex")
+                << " shader compile FAILED: " << log << std::endl;
+    }
+    if (!ok) {
+      static const int kSlot =
+          NWII_DIAG_SLOT("shader.compile_failed", diag::Kind::Error);
+      diag::bump(kSlot);
+    }
+  }
+
   GLuint p = glCreateProgram();
   glAttachShader(p, v);
   glAttachShader(p, f);
   glLinkProgram(p);
+
+  {
+    GLint linked = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &linked);
+    if (!linked) {
+      static const int kSlot =
+          NWII_DIAG_SLOT("shader.link_failed", diag::Kind::Error);
+      diag::bump(kSlot);
+    }
+    if (!linked && s_shader_errors < 4) {
+      ++s_shader_errors;
+      char log[2048] = {0};
+      glGetProgramInfoLog(p, sizeof(log) - 1, nullptr, log);
+      std::cerr << "[GX] shader link FAILED: " << log << std::endl;
+    }
+  }
 
   glDeleteShader(v);
   glDeleteShader(f);
@@ -405,8 +443,12 @@ static void DrawPrimitive(const GXCommand &cmd) {
     s_batch_open = true;
     s_batch_prim = (uint8_t)cmd.prim_type;
   }
-  if (s_skip_draw)
+  if (s_skip_draw) {
+    static const int kSlot =
+        NWII_DIAG_SLOT("draw.skipped_no_shader", diag::Kind::Warn);
+    diag::bump(kSlot);
     return; // shader for this state not ready yet
+  }
   EmitPrimitive(cmd);
 }
 

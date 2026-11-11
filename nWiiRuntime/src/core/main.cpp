@@ -19,6 +19,7 @@
 
 #include "runtime/gx_state.h"
 #include "runtime/hw/hw.h"
+#include "runtime/diagnostics.h"
 
 namespace nwii::runtime {
     namespace hw { extern uint32_t g_vi_top_field_base; }
@@ -58,9 +59,73 @@ void cpu_thread_func(nwii::runtime::CPUContext *ctx) {
   }
 }
 
+namespace {
+// Fullscreen-triangle blit used by the NWII_XFB present path. Kept local to
+// main.cpp so the VI scanout test does not depend on the GX renderer's state.
+struct XfbBlit {
+  GLuint prog = 0, vao = 0;
+  GLint sampler = -1;
+};
+
+GLuint xfb_compile(GLenum type, const char *src) {
+  GLuint s = glCreateShader(type);
+  glShaderSource(s, 1, &src, nullptr);
+  glCompileShader(s);
+  GLint ok = 0;
+  glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+  if (!ok) {
+    char log[1024] = {0};
+    glGetShaderInfoLog(s, sizeof(log) - 1, nullptr, log);
+    std::cerr << "[XFB] shader compile failed: " << log << std::endl;
+    glDeleteShader(s);
+    return 0;
+  }
+  return s;
+}
+
+bool xfb_blit_init(XfbBlit &b) {
+  static const char *vs = R"(#version 150 core
+out vec2 uv;
+void main() {
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+  static const char *fs = R"(#version 150 core
+in vec2 uv;
+uniform sampler2D uTex;
+out vec4 oCol;
+void main() { oCol = texture(uTex, uv); }
+)";
+  GLuint v = xfb_compile(GL_VERTEX_SHADER, vs);
+  GLuint f = xfb_compile(GL_FRAGMENT_SHADER, fs);
+  if (!v || !f) return false;
+  b.prog = glCreateProgram();
+  glAttachShader(b.prog, v);
+  glAttachShader(b.prog, f);
+  glBindAttribLocation(b.prog, 0, "aDummy");
+  glLinkProgram(b.prog);
+  glDeleteShader(v);
+  glDeleteShader(f);
+  GLint ok = 0;
+  glGetProgramiv(b.prog, GL_LINK_STATUS, &ok);
+  if (!ok) {
+    char log[1024] = {0};
+    glGetProgramInfoLog(b.prog, sizeof(log) - 1, nullptr, log);
+    std::cerr << "[XFB] program link failed: " << log << std::endl;
+    return false;
+  }
+  b.sampler = glGetUniformLocation(b.prog, "uTex");
+  glGenVertexArrays(1, &b.vao);
+  return true;
+}
+} // namespace
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+  nwii::runtime::diag::init();
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <path_to_unpacked_game_dir> [config_path]\n";
@@ -114,6 +179,7 @@ int main(int argc, char **argv) {
   SDL_AudioDeviceID audio_dev = 0;
   GLuint efb_fbo = 0, efb_tex = 0;
   GLuint xfb_tex = 0;
+  XfbBlit xfb_blit;
 
   if (!headless) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
@@ -181,6 +247,9 @@ int main(int argc, char **argv) {
       }
       std::cout << "[GL] " << (const char *)glGetString(GL_RENDERER) << " | "
                 << (const char *)glGetString(GL_VERSION) << std::endl;
+      std::cout << "[GL] vendor=" << (const char *)glGetString(GL_VENDOR)
+                << " glsl=" << (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION)
+                << "\n";
       SDL_GL_SetSwapInterval(1);
     }
     
@@ -215,6 +284,9 @@ int main(int argc, char **argv) {
     glBindTexture(GL_TEXTURE_2D, xfb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    if (std::getenv("NWII_XFB") && !xfb_blit_init(xfb_blit))
+      std::cerr << "[XFB] disabling XFB present path (init failed)"
+                << std::endl;
 
     SDL_AudioSpec want = {0}, have;
     want.freq = 32000;
@@ -560,9 +632,31 @@ int main(int argc, char **argv) {
     
     std::vector<unsigned char> xfb_px;
     unsigned xfb_w = 0, xfb_h = 0;
+    bool xfb_present = false;
     bool quit = false;
 
+    // NWII_MAX_SECONDS: stop the guest from the inside instead of relying on an
+    // external kill. SIGALRM is not dependable here (the guest's interrupt
+    // handlers can leave it undelivered), and only a clean stop lets the exit
+    // summary and NWII_STRICT's exit code run at all.
+    double max_seconds = 0.0;
+    if (const char *e = std::getenv("NWII_MAX_SECONDS")) max_seconds = std::atof(e);
+    const auto run_start = std::chrono::steady_clock::now();
+
     while (!quit && ctx->is_running) {
+      xfb_present = false;
+      if (max_seconds > 0.0) {
+        double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          run_start)
+                .count();
+        if (elapsed >= max_seconds) {
+          std::cout << "[DIAG] stopping after " << max_seconds
+                    << "s (NWII_MAX_SECONDS)" << std::endl;
+          quit = true;
+          ctx->is_running = false;
+        }
+      }
       if (!headless) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -613,6 +707,7 @@ int main(int argc, char **argv) {
         } else {
           glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, xw, xh, GL_RGBA, GL_UNSIGNED_BYTE, xfb_px.data());
         }
+        xfb_present = xfb_blit.prog != 0;
       }
 
       extern void ProcessGXFifo();
@@ -656,7 +751,8 @@ int main(int argc, char **argv) {
           for (int i = 0xE0; i <= 0xE7; ++i)
             std::cout << nwii::runtime::gx::g_state.bp[i] << ",";
 
-          
+          // Anything the runtime silently discarded in the last period shows up
+          // here, whether or not diagnostics were requested.
           std::cout << std::dec << " projType="
                     << nwii::runtime::gx::g_state.projType
                     << " projSet=" << (int)nwii::runtime::gx::g_state.projSet
@@ -685,6 +781,35 @@ int main(int argc, char **argv) {
                     << (int)nwii::runtime::gx::g_state.texStages[0].format
                     << " texnz=" << tex_nz << "/2048 tlutnz=" << tlut_nz << "/512"
                     << std::endl;
+
+          // Stuck-picture detector: identical framebuffer hash for several
+          // periods means the picture is not advancing, which is a different
+          // bug class from "renders the wrong thing".
+          {
+            static uint64_t last_hash = 0;
+            static size_t last_nb = (size_t)-1;
+            static int same = 0;
+            static bool warned = false;
+            uint64_t h = nwii_stat_hash0();
+            if (h == last_hash && nonblack == last_nb) {
+              if (++same >= 3 && !warned) {
+                warned = true;
+                std::cout << "[DIAG] *** picture unchanged for " << same * 5
+                          << "s (hash0=0x" << std::hex << h << std::dec
+                          << ", efb_nonblack=" << nonblack
+                          << "): the runtime is not advancing the frame"
+                          << std::endl;
+              }
+            } else {
+              same = 0;
+              warned = false;
+            }
+            last_hash = h;
+            last_nb = nonblack;
+          }
+
+          nwii::runtime::diag::report("stat");
+          nwii::runtime::diag::begin_period();
         }
       }
 
@@ -696,10 +821,21 @@ int main(int argc, char **argv) {
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer(0, 0, 640, 480, 0, 0, draw_w, draw_h,
-                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (xfb_present) {
+          glUseProgram(xfb_blit.prog);
+          glActiveTexture(GL_TEXTURE0);
+          glBindTexture(GL_TEXTURE_2D, xfb_tex);
+          if (xfb_blit.sampler >= 0) glUniform1i(xfb_blit.sampler, 0);
+          glBindVertexArray(xfb_blit.vao);
+          glDrawArrays(GL_TRIANGLES, 0, 3);
+          glBindVertexArray(0);
+          glUseProgram(0);
+        } else {
+          glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
+          glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+          glBlitFramebuffer(0, 0, 640, 480, 0, 0, draw_w, draw_h,
+                            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        }
 
         if (const char *shot_pfx = std::getenv("NWII_SCREENSHOT")) {
           static int shot_frame = 0;
@@ -712,8 +848,15 @@ int main(int argc, char **argv) {
           }();
           if ((++shot_frame % shot_every) == 0) {
             std::vector<unsigned char> px(640 * 480 * 4);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
-            glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            if (xfb_present) {
+              // Capture what is actually on screen: the presented XFB quad.
+              glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+              glReadBuffer(GL_BACK);
+              glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            } else {
+              glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
+              glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            }
             std::vector<unsigned char> flip(px.size());
             for (int y = 0; y < 480; ++y)
               std::memcpy(&flip[(size_t)y * 640 * 4],
@@ -767,5 +910,13 @@ int main(int argc, char **argv) {
     cpu_thread.join();
 
   nwii::runtime::shutdown();
+  nwii::runtime::diag::report("exit", true);
+  if (const char *strict = std::getenv("NWII_STRICT");
+      strict && strict[0] == '1' && nwii::runtime::diag::error_total() > 0) {
+    std::cout << "[DIAG] NWII_STRICT=1: exiting non-zero because the runtime "
+                 "discarded work (see counters above)"
+              << std::endl;
+    return 3;
+  }
   return 0;
 }

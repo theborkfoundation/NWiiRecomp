@@ -3,6 +3,8 @@
 #include <iostream>
 #include <vector>
 #include <mutex>
+#include <chrono>
+#include <cstdio>
 
 extern std::mutex g_fifo_mutex;
 extern std::vector<uint8_t> g_hw_fifo;
@@ -24,6 +26,7 @@ static uint32_t g_cp_fifo_rw_dist = 0;
 static uint32_t g_cp_fifo_wp = 0;
 static uint32_t g_cp_fifo_rp = 0;
 static uint32_t g_cp_fifo_bp = 0;
+static uint64_t g_cp_drained_total = 0;
 
 void cp_signal_draw_done() {
     static int n = 0;
@@ -37,6 +40,25 @@ void cp_signal_draw_done() {
 
 void cp_process_fifo() {
     if (!g_ctx_ptr) return;
+    // NWII_CPSTAT: is the title driving commands through the CP FIFO ring at all?
+    // If base/end are set and the write pointer moves but our drain is gated on
+    // CP_CR bit 0, those commands would never reach the parser while the vertex
+    // data written straight to the write-gather pipe still would.
+    {
+        static const bool cpstat = std::getenv("NWII_CPSTAT") != nullptr;
+        static auto t0 = std::chrono::steady_clock::now();
+        static int n = 0;
+        auto now = std::chrono::steady_clock::now();
+        if (cpstat &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - t0).count() >= 1) {
+            t0 = now;
+            printf("[CPSTAT] %d cr=0x%08X base=0x%08X end=0x%08X wp=0x%08X rp=0x%08X "
+                   "hp=0x%08X drained_total=%llu\n",
+                   ++n, g_cp_cr, g_cp_fifo_base, g_cp_fifo_end, g_cp_fifo_wp,
+                   g_cp_fifo_rp, g_cp_fifo_bp,
+                   (unsigned long long)g_cp_drained_total);
+        }
+    }
     if (!(g_cp_cr & 1)) return; 
 
     uint32_t rp = g_cp_fifo_rp & 0x03FFFFFF;
@@ -72,6 +94,7 @@ void cp_process_fifo() {
         std::lock_guard<std::mutex> lock(::g_fifo_mutex);
         ::g_hw_fifo.insert(::g_hw_fifo.end(), batch.begin(), batch.end());
     }
+    g_cp_drained_total += batch.size();
 
     if (g_cp_fifo_rp == g_cp_fifo_wp) {
         g_cp_sr |= 0x0E;

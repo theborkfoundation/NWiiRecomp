@@ -9,6 +9,7 @@ namespace nwii::runtime { extern CPUContext *g_ctx_ptr; }
 #include "runtime/hw/hw.h"
 #include "runtime/gx_state.h"
 #include "runtime/cpu_context.h"
+#include "runtime/diagnostics.h"
 #include <iostream>
 #include <cstdlib>
 #include <vector>
@@ -39,6 +40,63 @@ namespace nwii::runtime {
 std::mutex g_fifo_mutex;
 std::vector<uint8_t> g_hw_fifo;
 
+namespace nwii::runtime {
+uint64_t g_wgp_addr_exact = 0;
+uint64_t g_wgp_addr_page = 0;
+uint32_t g_wgp_addr_hist[1024] = {0};
+bool g_wgp_drop4 = []() {
+    const char *e = std::getenv("NWII_WGP_DROP4");
+    return e && e[0] == '1';
+}();
+}
+// Monotonic count of bytes ever pushed into the GX FIFO. Equals the offset in an
+// NWII_GXDUMP stream, so a producer-side event can be matched against the bytes
+// that reach the parser.
+static uint64_t g_wgp_total_bytes = 0;
+
+namespace nwii::runtime {
+uint64_t GX_WGP_Count() { return ::g_wgp_total_bytes; }
+}
+
+namespace {
+
+// Draw-header probe (NWII_HDRLOG). A GX draw command is
+// <opcode 0x80..0xB7><count u16>; the engine writes it as stb then sth. Recording
+// the FIFO offset of each emitted header makes it possible to check whether that
+// header is still there in the captured stream.
+static const bool g_hdrlog = std::getenv("NWII_HDRLOG") != nullptr;
+static bool g_hdr_pending = false;
+static uint64_t g_hdr_off = 0;
+static uint8_t g_hdr_op = 0;
+static uint64_t g_hdr_emitted = 0;
+
+void hdr_note8(uint8_t v, uint64_t off_before) {
+    if (!g_hdrlog) return;
+    if (v >= 0x80 && v <= 0xB7) {
+        g_hdr_pending = true;
+        g_hdr_off = off_before;
+        g_hdr_op = v;
+    } else {
+        g_hdr_pending = false;
+    }
+}
+
+void hdr_note16(uint16_t v, uint64_t off_before) {
+    if (!g_hdrlog) return;
+    if (g_hdr_pending && off_before == g_hdr_off + 1) {
+        ++g_hdr_emitted;
+        if (g_hdr_emitted <= 300)
+            printf("[HDR] off=%llu op=0x%02X count=%u\n",
+                   (unsigned long long)g_hdr_off, g_hdr_op, v);
+        else if ((g_hdr_emitted % 500) == 0)
+            printf("[HDR] ... emitted so far: %llu\n",
+                   (unsigned long long)g_hdr_emitted);
+    }
+    g_hdr_pending = false;
+}
+
+} // namespace
+
 // Display lists are read out of guest RAM when the FIFO is parsed, which is
 // long after the game issued the call -- and the game double-buffers those
 // buffers, so by then the bytes can already belong to the next frame. The
@@ -48,6 +106,7 @@ static std::mutex g_dl_snap_mtx;
 static std::map<uint64_t, std::vector<uint8_t>> g_dl_snap;
 
 namespace nwii::runtime {
+
 void GX_DL_Snapshot(uint32_t addr, uint32_t size) {
     if (!nwii::runtime::g_mmu || size == 0 || size > (8u << 20)) return;
     std::vector<uint8_t> buf(size);
@@ -157,8 +216,16 @@ void ProcessGXFifo() {
             last_frame_end = (int)i;
         }
     }
-    if (last_frame_end < 0)
+    if (last_frame_end < 0) {
+        // Bytes are pending but no frame boundary was found: the frame model, not
+        // the game, is what is holding the picture back.
+        if (!s_carry.empty()) {
+            static const int kSlot =
+                NWII_DIAG_SLOT("frame.carry_without_end", diag::Kind::Warn);
+            diag::bump(kSlot);
+        }
         return; 
+    }
 
     
 
@@ -168,9 +235,14 @@ void ProcessGXFifo() {
 
     std::vector<nwii::runtime::gx::GXCommand> frame;
     frame.reserve(s_carry.size());
+    // NWII_KEEP_STALE: keep draws that belong to the previous frame instead of
+    // dropping them. They are normally dropped to avoid half-buffer artefacts,
+    // but if the frame boundary is being mis-detected here, every draw can end up
+    // classified as stale and nothing reaches the screen.
+    static const bool keep_stale = std::getenv("NWII_KEEP_STALE") != nullptr;
     for (int i = 0; i <= last_frame_end; ++i) {
         auto &c = s_carry[i];
-        if (i <= prev_frame_end &&
+        if (!keep_stale && i <= prev_frame_end &&
             c.type == nwii::runtime::gx::GXCommandType::DrawPrimitive)
             continue; 
         frame.push_back(std::move(c));
@@ -219,6 +291,10 @@ void ProcessGXFifo() {
     }
 
     ++g_stat_frames;
+    {
+        static const int kSlot = NWII_DIAG_SLOT("frame.count", diag::Kind::Info);
+        diag::bump(kSlot);
+    }
     // Decode only the surviving frame's draws (stale frames' draws were
     // dropped above and their vertices are never built).
     auto d0 = std::chrono::steady_clock::now();
@@ -351,21 +427,102 @@ static inline void wgp_push(uint8_t b) {
             zeros = 0;
         }
     }
+    // NWII_WGPCALL: identify the exact instruction (pc) and its caller (lr) that
+    // pushes a non-zero byte right after a zero run -- i.e. the byte that the
+    // parser cannot place.
+    static const bool wgcall = std::getenv("NWII_WGPCALL") != nullptr;
+    if (wgcall) {
+        static int zeros = 0;
+        if (b == 0) {
+            ++zeros;
+        } else {
+            if (zeros >= 20 && b >= 0x80 && g_ctx_ptr) {
+                static int shown = 0;
+                if (shown++ < 40)
+                    printf("[WGCALL] val=0x%02X after %d zeros pc=0x%08X lr=0x%08X\n",
+                           b, zeros, g_ctx_ptr->pc, g_ctx_ptr->lr);
+            }
+            zeros = 0;
+        }
+    }
+
+    // NWII_WGTHR: is more than one OS thread writing the FIFO? Two interleaved
+    // writers would explain commands landing inside a vertex stream.
+    static const bool wgthr = std::getenv("NWII_WGTHR") != nullptr;
+    if (wgthr) {
+        static uint64_t total = 0;
+        static uint32_t last_thread = 0;
+        static int transitions = 0;
+        if (g_ctx_ptr) {
+            uint32_t th = g_ctx_ptr->mmu.read32(0x800000E4u);
+            if (th != last_thread) {
+                if (transitions++ < 40)
+                    printf("[WGTHR] byte %llu: thread 0x%08X -> 0x%08X (lr=0x%08X)\n",
+                           (unsigned long long)total, last_thread, th,
+                           g_ctx_ptr->lr);
+                last_thread = th;
+            }
+        }
+        ++total;
+    }
+
     g_hw_fifo.push_back(b);
+    ++g_wgp_total_bytes;
 }
 
 
 
 
 
+// The GX write-gather pipe (0xCC008000) always feeds the CP's command FIFO on
+// real hardware; the PI FIFO registers at 0xCC00300C/10/14 govern a separate PI
+// channel and never divert GX commands. Titles that use the PI FIFO for their
+// own buffers (Rayman Origins does, for in-MEM1 display lists) were therefore
+// having whole blocks of GX commands silently stolen out of the middle of a
+// frame, which desynced the FIFO parser and dropped draws. Keep the diversion
+// available, but opt-in only.
+static bool pip_fifo_redirect_enabled() {
+    static const bool on = []() {
+        const char *e = std::getenv("NWII_PI_FIFO_REDIRECT");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
 static bool wgp_redirect(uint8_t b) {
+    if (!pip_fifo_redirect_enabled()) return false;
     uint32_t base, end, wptr;
     nwii::runtime::hw::pi_fifo_get(base, end, wptr);
-    if (base == 0) return false; 
-    uint32_t cp_base = nwii::runtime::hw::cp_fifo_base_reg();
-    if ((base & 0x03FFFFFF) == (cp_base & 0x03FFFFFF))
-        return false; 
-    if (!nwii::runtime::g_mmu) return false;
+    bool redirect = base != 0;
+    if (redirect) {
+        uint32_t cp_base = nwii::runtime::hw::cp_fifo_base_reg();
+        if ((base & 0x03FFFFFF) == (cp_base & 0x03FFFFFF))
+            redirect = false;
+    }
+    if (redirect && !nwii::runtime::g_mmu) redirect = false;
+
+    // Report transitions: FIFO bytes silently leaving the GX stream would drop
+    // whole commands out of the middle of a frame.
+    {
+        static bool s_last = false;
+        static uint64_t s_bytes = 0;
+        static int s_msgs = 0;
+        if (redirect != s_last && s_msgs++ < 20) {
+            printf("[WGPREDIR] %s at %llu bytes redirected (pi base=0x%08X end=0x%08X "
+                   "wptr=0x%08X cp_base=0x%08X)\n",
+                   redirect ? "START" : "STOP", (unsigned long long)s_bytes, base,
+                   end, wptr, nwii::runtime::hw::cp_fifo_base_reg());
+            s_last = redirect;
+        }
+        if (redirect) ++s_bytes;
+    }
+
+    if (!redirect) return false;
+    {
+        static const int kSlot =
+            NWII_DIAG_SLOT("wgp.redirected_bytes", diag::Kind::Warn);
+        diag::bump(kSlot);
+    }
     nwii::runtime::g_mmu->write8(0x80000000u | (wptr & 0x01FFFFFFu), b);
     wptr += 1;
     if ((wptr & 0x03FFFFFF) > (end & 0x03FFFFFF))
@@ -376,15 +533,19 @@ static bool wgp_redirect(uint8_t b) {
 
 void GX_WGPIPE_Write8(uint8_t val) {
     if (wgp_redirect(val)) return;
+    const uint64_t off_before = g_wgp_total_bytes;
     std::lock_guard<std::mutex> lock(g_fifo_mutex);
     wgp_push(val);
+    hdr_note8(val, off_before);
 }
 
 void GX_WGPIPE_Write16(uint16_t val) {
     if (wgp_redirect(val >> 8)) { wgp_redirect(val & 0xFF); return; }
+    const uint64_t off_before = g_wgp_total_bytes;
     std::lock_guard<std::mutex> lock(g_fifo_mutex);
     wgp_push(val >> 8);
     wgp_push(val & 0xFF);
+    hdr_note16(val, off_before);
 }
 
 void GX_WGPIPE_Write32(uint32_t val) {

@@ -25,6 +25,7 @@ endif()
 add_library(nwiiruntime STATIC
     src/core/loader.cpp
     src/core/config.cpp
+    src/core/diagnostics.cpp
     src/core/os_hle_stubs.cpp
     src/core/event_scheduler.cpp
     src/input/input_manager.cpp

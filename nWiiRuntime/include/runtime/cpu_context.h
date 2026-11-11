@@ -31,6 +31,21 @@ void GX_DL_Snapshot(uint32_t addr, uint32_t size);
 bool GX_DL_Fetch(uint32_t addr, uint32_t size, std::vector<uint8_t>& out);
 void GX_WGPIPE_WriteF32(float val);
 void GX_WGPIPE_WriteF64(double val);
+// Bytes pushed into the GX FIFO so far (equals the offset in an NWII_GXDUMP).
+uint64_t GX_WGP_Count();
+
+// Writes that hit the write-gather pipe page, split by whether they targeted the
+// pipe itself (offset 0x8000 within the page) or some other address in it.
+extern uint64_t g_wgp_addr_exact;
+extern uint64_t g_wgp_addr_page;
+extern uint32_t g_wgp_addr_hist[1024];
+// Diagnostic: ignore writes at page offset 4 (0x0C008004) to test whether they
+// belong to the FIFO at all.
+extern bool g_wgp_drop4;
+
+static inline bool wgp_skip(uint32_t paddr) {
+  return g_wgp_drop4 && (paddr & 0xFFFu) == 4u;
+}
 
 uint16_t HW_Reg_Read16(uint32_t addr);
 uint32_t HW_Reg_Read32(uint32_t addr);
@@ -119,6 +134,32 @@ struct MMU {
     return (paddr & 0xFFFFF000u) == 0x0C008000 || (paddr & 0xFFFFF000u) == 0x0D008000;
   }
 
+  // Address accounting for writes that land in the write-gather pipe page. Only
+  // 0x0C008000 (and its 0x0D alias) is the FIFO window; anything else in the
+  // page is a different address and must not be treated as FIFO data.
+  static inline void wgp_account(uint32_t paddr, int width) {
+    uint32_t page_off = (paddr & 0xFFFu) >> 2;
+    if (page_off == 0) {
+      ++g_wgp_addr_exact;
+      return;
+    }
+    ++g_wgp_addr_page;
+    ++g_wgp_addr_hist[page_off & 1023u];
+    static const bool dbg = std::getenv("NWII_WGPADDR") != nullptr;
+    static int n = 0;
+    if (dbg && n++ < 24)
+      std::cout << "[WGPADDR] at=" << GX_WGP_Count() << " addr=0x" << std::hex
+                << paddr << std::dec << " width=" << width << std::endl;
+    // Menu phase: does the headerless vertex run come from these writes?
+    if (dbg && GX_WGP_Count() > 12000) {
+      static int m = 0;
+      if (m++ < 4000)
+        std::cout << "[WGPADDR-LATE] at=" << GX_WGP_Count() << " addr=0x"
+                  << std::hex << paddr << std::dec << " width=" << width
+                  << std::endl;
+    }
+  }
+
   void custom_watch(uint32_t, uint32_t, int) {}
 
   // Slow-path fallback handlers (out-of-line)
@@ -132,7 +173,7 @@ struct MMU {
   }
 
   __attribute__((noinline)) void write8_slow(uint32_t paddr, uint8_t value) {
-    if (is_wgpipe(paddr)) { GX_WGPIPE_Write8(value); return; }
+    if (is_wgpipe(paddr)) { if (wgp_skip(paddr)) return; wgp_account(paddr, 8); GX_WGPIPE_Write8(value); return; }
     if (is_hw_reg(paddr)) return; 
   }
 
@@ -142,7 +183,7 @@ struct MMU {
   }
 
   __attribute__((noinline)) void write16_slow(uint32_t paddr, uint16_t value) {
-    if (is_wgpipe(paddr)) { GX_WGPIPE_Write16(value); return; }
+    if (is_wgpipe(paddr)) { if (wgp_skip(paddr)) return; wgp_account(paddr, 16); GX_WGPIPE_Write16(value); return; }
     if (is_hw_reg(paddr)) { HW_Reg_Write16(paddr, value); return; }
   }
 
@@ -152,23 +193,25 @@ struct MMU {
   }
 
   __attribute__((noinline)) void write32_slow(uint32_t paddr, uint32_t value) {
-    if (is_wgpipe(paddr)) { GX_WGPIPE_Write32(value); return; }
+    if (is_wgpipe(paddr)) { if (wgp_skip(paddr)) return; wgp_account(paddr, 32); GX_WGPIPE_Write32(value); return; }
     if (is_hw_reg(paddr)) { HW_Reg_Write32(paddr, value); return; }
   }
 
   __attribute__((noinline)) void write64_slow(uint32_t paddr, uint64_t value) {
     if (is_wgpipe(paddr)) {
+      if (wgp_skip(paddr)) return;
+      wgp_account(paddr, 64);
       GX_WGPIPE_Write32((uint32_t)(value >> 32));
       GX_WGPIPE_Write32((uint32_t)(value & 0xFFFFFFFF));
     }
   }
 
   __attribute__((noinline)) void write_f32_slow(uint32_t paddr, float value) {
-    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF32(value); return; }
+    if (is_wgpipe(paddr)) { if (wgp_skip(paddr)) return; wgp_account(paddr, 32); GX_WGPIPE_WriteF32(value); return; }
   }
 
   __attribute__((noinline)) void write_f64_slow(uint32_t paddr, double value) {
-    if (is_wgpipe(paddr)) { GX_WGPIPE_WriteF64(value); return; }
+    if (is_wgpipe(paddr)) { if (wgp_skip(paddr)) return; wgp_account(paddr, 64); GX_WGPIPE_WriteF64(value); return; }
   }
 
   // Fast-path inlined operations
