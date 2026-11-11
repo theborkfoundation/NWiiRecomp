@@ -365,3 +365,23 @@ of a white quad -- more correct, still not the menu, which points at the game's
 state machine rather than the renderer: the boot sequence loops strap -> menu
 attempt -> strap, consistent with the menu background being a video that fails to
 open.
+
+### Seeing what is underneath the boot overlays
+
+`NWII_SKIP_TEX=<hexaddr>[,<hexaddr>...]` drops draws whose stage-0 texture is one
+of the listed addresses. The wrist-strap safety screen is two full-screen quads
+(640x480 RGB565) alternating between `106B3620` and `10749680`, so:
+
+```sh
+NWII_SKIP_VIDEOS=1 NWII_SKIP_TEX=106B3620,10749680 NWII_SCREENSHOT=/tmp/s \
+  NWII_SHOT_EVERY=60 ./RaymanOrigins <game>
+```
+
+With those two dropped the runtime renders real game frames: a green foliage
+landscape, and a blue loading screen with butterflies. So the 3D path, texture
+sampling, sprites and transforms all work; what the user sees most of the time is
+a flat full-screen quad sampling a flat-filled texture (the video screen we cannot
+decode), not a broken renderer.
+
+This is a diagnostic, not a fix: the strap screen is still on screen in a normal
+run, and the game still has not reached the main menu.

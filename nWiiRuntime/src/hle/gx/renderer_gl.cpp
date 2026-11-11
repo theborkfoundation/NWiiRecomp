@@ -801,6 +801,30 @@ public:
         }
       } else if (cmd.type == GXCommandType::DrawPrimitive) {
 
+        // NWII_SKIP_TEX=<hexaddr>[,<hexaddr>...]: drop draws whose stage-0
+        // texture is one of those addresses. Diagnostic for "is this full-screen
+        // quad covering the scene?" -- comparing the frame with and without it
+        // shows what is underneath.
+        struct SkipTexList { uint32_t a[4]; };
+        static const SkipTexList skip_tex = []() {
+          SkipTexList s = {{0, 0, 0, 0}};
+          if (const char *e = std::getenv("NWII_SKIP_TEX")) {
+            const char *p = e;
+            for (int i = 0; i < 4 && *p; ++i) {
+              s.a[i] = (uint32_t)std::strtoul(p, (char **)&p, 16);
+              while (*p == ',' || *p == ' ') ++p;
+            }
+          }
+          return s;
+        }();
+        if (skip_tex.a[0] || skip_tex.a[1] || skip_tex.a[2] || skip_tex.a[3]) {
+          uint32_t base = g_state.texStages[0].base_addr & 0x03FFFFFFu;
+          bool skip = false;
+          for (int i = 0; i < 4; ++i)
+            if (skip_tex.a[i] && base == (skip_tex.a[i] & 0x03FFFFFFu)) skip = true;
+          if (skip) continue;
+        }
+
         if (g_ctx_ptr) {
           // Bind on every draw, not once per batch. The engine merges consecutive
           // draws that share a primitive type into one batch, so binding at batch
