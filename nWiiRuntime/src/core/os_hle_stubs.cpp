@@ -3,6 +3,7 @@
 #include "runtime/hw/hw.h"
 #include "runtime/hw/mmio_dispatcher.h"
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -288,6 +289,20 @@ extern "C" void VIGetNextField(CPUContext &ctx) {
 }
 
 extern "C" void VIWaitForRetrace(CPUContext &ctx) {
-
+  // Pace the guest's frame clock to the real display rate. Without this the
+  // interrupt fires as fast as the CPU can run, so every frame-based timer in
+  // the game (animations, the intro movie, menu idle timers) advances far
+  // faster than wall clock.
+  static const bool s_nopace = std::getenv("NWII_NOPACE") != nullptr;
+  static auto next = std::chrono::steady_clock::now();
+  if (!s_nopace) {
+    next += std::chrono::microseconds(16683);  // 59.94 Hz
+    const auto now = std::chrono::steady_clock::now();
+    if (next > now) {
+      std::this_thread::sleep_for(next - now);
+    } else {
+      next = now;
+    }
+  }
   nwii::runtime::hw::vi_trigger_interrupt();
 }

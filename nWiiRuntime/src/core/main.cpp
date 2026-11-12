@@ -173,6 +173,9 @@ int main(int argc, char **argv) {
 
   const char *headless_env = std::getenv("NWII_HEADLESS");
   bool headless = headless_env && headless_env[0] == '1';
+  // NWII_HIDDEN_WINDOW: keep the GL path (and therefore screenshots) alive but
+  // create the window hidden, so it never takes focus or the cursor.
+  const bool hidden_window = std::getenv("NWII_HIDDEN_WINDOW") != nullptr;
 
   SDL_Window* window = nullptr;
   SDL_GLContext gl_ctx = nullptr;
@@ -215,7 +218,8 @@ int main(int argc, char **argv) {
                         SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #endif
     bool use_gl = (nwii::runtime::Config::get().backend == nwii::runtime::Backend::OpenGL);
-    uint32_t window_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t window_flags = (hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) |
+                            SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (use_gl) {
         window_flags |= SDL_WINDOW_OPENGL;
     } else {
@@ -955,12 +959,21 @@ int main(int argc, char **argv) {
         rvl_feed_input(*ctx);
       }
       maybe_memdump();
-      if (headless && g_stat_draws > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
-      else if (std::getenv("NWII_NO_VSYNC"))
-        // With the swap interval disabled nothing paces the loop, so VI would
-        // be raised thousands of times per second. Keep the guest at ~60 Hz.
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      // Pace the guest to the display rate. Relying on the swap interval is not
+      // enough: when the swap does not actually block, the guest's frame clock
+      // free-runs and every frame-based timer (animations, intro movie, menu
+      // idle timer) advances much faster than wall clock. NWII_NOPACE=1 opts
+      // out for fast automated captures.
+      static const bool s_nopace = std::getenv("NWII_NOPACE") != nullptr;
+      if (!s_nopace) {
+        static auto next_frame = std::chrono::steady_clock::now();
+        next_frame += std::chrono::microseconds(16683);  // 59.94 Hz
+        const auto now = std::chrono::steady_clock::now();
+        if (next_frame > now)
+          std::this_thread::sleep_for(next_frame - now);
+        else
+          next_frame = now;  // running behind: resync, do not accumulate debt
+      }
     }
 
     if (!headless) {
