@@ -142,6 +142,20 @@ void Config::load_game_profile() {
         auto rpl = tbl["game"]["rpl_path"].value<std::string>();
         if (rpl) game_profile.rpl_path = *rpl;
 
+        auto lin = tbl["quirks"]["linear_i8"].value<bool>();
+        if (lin) {
+            game_profile.linear_i8 = *lin;
+            std::cout << "[Config] Game profile: linear_i8 = "
+                      << (game_profile.linear_i8 ? "true" : "false") << std::endl;
+        }
+
+        auto cbias = tbl["quirks"]["chroma_bias_i8"].value<bool>();
+        if (cbias) {
+            game_profile.chroma_bias_i8 = *cbias;
+            std::cout << "[Config] Game profile: chroma_bias_i8 = "
+                      << (game_profile.chroma_bias_i8 ? "true" : "false") << std::endl;
+        }
+
         auto eid = tbl["hle"]["ext_interrupt_dispatch"].value<int64_t>();
         if (eid) {
             game_profile.ext_interrupt_dispatch = (uint32_t)*eid;

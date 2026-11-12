@@ -869,6 +869,7 @@ static void dbg_disp(const char *kind, uint32_t handler, uint32_t c,
             << " saved=0x" << ctx.dispatch_saved_ctx << std::dec << "\n";
 }
 
+
 bool process_pending_callbacks(CPUContext &ctx) {
   if (s_env_sample()) {
     static uint64_t sample_n = 0;
@@ -880,7 +881,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                 << " bk=" << ctx.backup_stack.size()
                 << " saved=0x" << std::hex << ctx.dispatch_saved_ctx
                 << " cur=0x" << ctx.mmu.read32(0x800000E4)
-                << " d4=0x" << ctx.mmu.read32(0x800000D4) << std::dec << "\n";
+                << " d4=0x" << ctx.mmu.read32(0x800000D4) << " msr=0x" << ctx.msr << " imr=0x" << nwii::runtime::hw::pi_intmr.load() << " isr=0x" << nwii::runtime::hw::pi_intsr.load() << std::dec << "\n";
     }
   }
 
@@ -936,7 +937,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.dispatch_saved_ctx = 0;
     }
     if (hle_load_context_from_guest(ctx)) {
-      ctx.dec_written_tb = ctx.read_timebase();
       static uint32_t restore_count = 0;
       restore_count++;
       if (std::getenv("NWII_DBG_CTX")) {
@@ -1090,7 +1090,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if (ctx.in_callback) {
-    if (s_env_sample() && (nwii::runtime::hw::pi_intsr & 0x00000010)) {
+    if (s_env_sample() && (nwii::runtime::hw::pi_intsr & 0x00004000)) {
         static uint64_t n = 0;
         if ((n++ % 100000) == 0)
             std::cout << "[IPC] irq pending but in_callback pc=0x" << std::hex
@@ -1158,47 +1158,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
       
 
       
-      {
-          static uint32_t dec_same_pc_count = 0;
-          static uint32_t dec_last_pc = 0;
-          if (ctx.pc == dec_last_pc) {
-              dec_same_pc_count++;
-          } else {
-              dec_same_pc_count = 0;
-              dec_last_pc = ctx.pc;
-          }
-
-          if (dec_same_pc_count == 64) {
-              dec_same_pc_count = 0;
-              if (ctx.gpr[13] != 0) {
-                  uint64_t now_tb = ctx.read_timebase();
-                  uint32_t now_hi = (uint32_t)(now_tb >> 32);
-                  uint32_t now_lo = (uint32_t)(now_tb & 0xFFFFFFFF);
-                  uint32_t base = ctx.gpr[13];
-                  for (int i = 0; i < 512; i++) {
-                      uint32_t addr = base - (uint32_t)(i * 4);
-                      if (addr < 0x80000000u || addr > 0x81FFFFFFu) continue;
-                      uint32_t handler = ctx.mmu.read32(addr + 0x18);
-                      if (handler < 0x80000000u || handler >= 0x82000000u) continue;
-                      uint32_t fire_hi = ctx.mmu.read32(addr + 0x08);
-                      uint32_t fire_lo = ctx.mmu.read32(addr + 0x0C);
-                      if (fire_hi == 0 && fire_lo == 0) continue;
-                      if (fire_hi < now_hi || (fire_hi == now_hi && fire_lo <= now_lo))
-                          continue;
-                      ctx.mmu.write32(addr + 0x08, now_hi);
-                      ctx.mmu.write32(addr + 0x0C, now_lo);
-                      static uint32_t forced_count = 0;
-                      if ((forced_count++ % 32) == 0)
-                          std::cout << "[HLE DEC] force-expired alarm 0x"
-                                    << std::hex << addr << " handler=0x"
-                                    << handler << std::dec << "\n";
-                  }
-              }
-              // return false;
-          }
-      }
-
-      
       static uint32_t dcount = 0;
       if ((dcount++ % 500) == 0) {
           uint32_t cur = ctx.mmu.read32(0x800000E4);
@@ -1254,11 +1213,11 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
   uint32_t cp_h = ctx.mmu.read32(0x80003040 + 17 * 4);
   if (cp_h != 0 && cp_h != 0xFFFFFFFF) {
-      effective_intmr |= 0x4000;
+      effective_intmr |= 0x800;
   }
   uint32_t ipc_h = ctx.mmu.read32(0x80003040 + 27 * 4);
   if (ipc_h != 0 && ipc_h != 0xFFFFFFFF) {
-      effective_intmr |= 0x10;
+      effective_intmr |= 0x4000;
   }
   uint32_t active_ints = nwii::runtime::hw::pi_intsr & effective_intmr;
 
@@ -1388,17 +1347,17 @@ bool process_pending_callbacks(CPUContext &ctx) {
               int os_intr = -1;
               uint32_t bit_to_clear = 0;
               
-              if      (active_ints & 0x00004000) { os_intr = 17; bit_to_clear = 0x00004000; } 
+              if      (active_ints & 0x00000800) { os_intr = 17; bit_to_clear = 0x00000800; }
               else if (active_ints & 0x00000100) { os_intr = 24; bit_to_clear = 0x00000100; } 
               else if (active_ints & 0x00000004) { os_intr = 21; bit_to_clear = 0x00000004; } 
               else if (active_ints & 0x00000008) { os_intr = 20; bit_to_clear = 0x00000008; } 
-              else if (active_ints & 0x00000010) { os_intr = 27; bit_to_clear = 0x00000010; } 
+              else if (active_ints & 0x00004000) { os_intr = 27; bit_to_clear = 0x00004000; }
 
               else if (active_ints & 0x00000040) { os_intr = nwii::runtime::hw::dsp_pending_os_interrupt(); bit_to_clear = 0x00000040; } 
               else if (active_ints & 0x00000020) { os_intr =  8; bit_to_clear = 0x00000020; } 
               else if (active_ints & 0x00000400) { os_intr = 19; bit_to_clear = 0x00000400; } 
               else if (active_ints & 0x00000200) { os_intr = 18; bit_to_clear = 0x00000200; } 
-              else if (active_ints & 0x00000800) { os_intr = 17; bit_to_clear = 0x00000800; } 
+
 
               if (os_intr != -1) {
                   uint32_t handler = ctx.mmu.read32(0x80003040 + os_intr * 4);
@@ -1494,7 +1453,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                       // latches/acknowledges it in INTSR, so clear it here.
                       // Leaving it pending starves every lower-priority cause:
                       // a stale VI bit (0x100) with no handler permanently
-                      // blocks the IPC reply IRQ (0x10), which hangs the first
+                      // blocks the IPC reply IRQ (0x4000), which hangs the first
                       // async IOS call (ES close) during boot.
                       nwii::runtime::hw::clear_pi_interrupt(bit_to_clear);
                       if (s_env_debug()) {

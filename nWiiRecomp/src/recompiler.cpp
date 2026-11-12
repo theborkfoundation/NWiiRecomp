@@ -32,17 +32,11 @@ static const std::unordered_set<std::string> &hle_handlers() {
   // implemented but broke rendering in Mario Party 7, so they stay opt-in via
   // the TOML until that is understood.
   static const std::unordered_set<std::string> s = {
+      // State setters must execute the guest SDK: they also update GXData's
+      // cached registers/dirty flags, which later guest setters read. Emitting
+      // only a native FIFO write loses those changes (e.g. TEV stage count).
       "GXLoadNrmMtxImm",
       "GXLoadPosMtxImm",
-      "GXSetAlphaCompare",
-      "GXSetBlendMode",
-      "GXSetCullMode",
-      "GXSetCurrentMtx",
-      "GXSetDstAlpha",
-      "GXSetNumTevStages",
-      "GXSetScissor",
-      "GXSetZCompLoc",
-      "GXSetZMode",
       "OSAllocFromHeap",
       "OSCreateHeap",
       "OSFreeToHeap",
@@ -1005,6 +999,12 @@ void Recompiler::emit_instruction(std::ostream &out,
       << inst.address << ": ";
   out << std::setfill('0') << std::setw(8) << inst.opcode << std::dec << "\n";
 
+  if (auto patch = config_.instruction_overrides.find(inst.address);
+      patch != config_.instruction_overrides.end()) {
+    out << "    " << patch->second << "\n";
+    return;
+  }
+
   if (ppc_inst.opcode() == 14) {
     
     uint32_t rD = ppc_inst.rd();
@@ -1610,34 +1610,34 @@ void Recompiler::emit_instruction(std::ostream &out,
 
     
     if (xo == 21) {
-      out << "    ctx.fpr[" << fD << "] = (float)(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(ctx.fpr[" << fA
           << "] + ctx.fpr[" << fB << "]); // fadds\n";
     } else if (xo == 20) {
-      out << "    ctx.fpr[" << fD << "] = (float)(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(ctx.fpr[" << fA
           << "] - ctx.fpr[" << fB << "]); // fsubs\n";
     } else if (xo == 25) {
-      out << "    ctx.fpr[" << fD << "] = (float)(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(ctx.fpr[" << fA
           << "] * ctx.fpr[" << fC << "]); // fmuls\n";
     } else if (xo == 18) {
-      out << "    ctx.fpr[" << fD << "] = (float)(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(ctx.fpr[" << fA
           << "] / ctx.fpr[" << fB << "]); // fdivs\n";
     } else if (xo == 22) {
-      out << "    ctx.fpr[" << fD << "] = (float)std::sqrt(ctx.fpr[" << fB
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)std::sqrt(ctx.fpr[" << fB
           << "]); // fsqrts\n";
     } else if (xo == 24) {
-      out << "    ctx.fpr[" << fD << "] = (float)(1.0f / ctx.fpr[" << fB
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(1.0f / ctx.fpr[" << fB
           << "]); // fres\n";
     } else if (xo == 29) {
-      out << "    ctx.fpr[" << fD << "] = (float)std::fma(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)std::fma(ctx.fpr[" << fA
           << "], ctx.fpr[" << fC << "], ctx.fpr[" << fB << "]); // fmadds\n";
     } else if (xo == 28) {
-      out << "    ctx.fpr[" << fD << "] = (float)std::fma(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)std::fma(ctx.fpr[" << fA
           << "], ctx.fpr[" << fC << "], -ctx.fpr[" << fB << "]); // fmsubs\n";
     } else if (xo == 31) {
-      out << "    ctx.fpr[" << fD << "] = (float)(-std::fma(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(-std::fma(ctx.fpr[" << fA
           << "], ctx.fpr[" << fC << "], ctx.fpr[" << fB << "])); // fnmadds\n";
     } else if (xo == 30) {
-      out << "    ctx.fpr[" << fD << "] = (float)(-std::fma(ctx.fpr[" << fA
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (float)(-std::fma(ctx.fpr[" << fA
           << "], ctx.fpr[" << fC << "], -ctx.fpr[" << fB << "])); // fnmsubs\n";
     } else {
       out << "    std::cerr << \"UNIMPLEMENTED Opcode 59 XO \" << " << xo
@@ -1660,7 +1660,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.fpr[" << fD << "] = -std::fabs(ctx.fpr[" << fB
           << "]); // fnabs\n";
     } else if (xo == 12) { 
-      out << "    ctx.fpr[" << fD << "] = (double)(float)ctx.fpr[" << fB
+      out << "    ctx.fpr[" << fD << "] = ctx.ps1[" << fD << "] = (double)(float)ctx.fpr[" << fB
           << "]; // frsp\n";
     } else if (xo == 15) { 
       out << "    {\n";
@@ -1804,6 +1804,12 @@ void Recompiler::emit_instruction(std::ostream &out,
     uint32_t rD = ppc_inst.rd();
     uint32_t rA = ppc_inst.ra();
     uint32_t rB = ppc_inst.rb();
+    // In non-update indexed memory instructions RA=0 means a zero base,
+    // regardless of the value stored in GPR0 (which may also be the destination).
+    const std::string indexed_ea =
+        (rA ? "ctx.gpr[" + std::to_string(rA) + "] + " : "") +
+        "ctx.gpr[" + std::to_string(rB) + "]";
+
     uint32_t rS = ppc_inst.rs();
 
     if (xo == 598 || xo == 854 || xo == 982 || xo == 54 || xo == 86 ||
@@ -1991,14 +1997,17 @@ void Recompiler::emit_instruction(std::ostream &out,
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rA << "] == 0);\n";
       }
     } else if (xo == 792) {
-      out << "    ctx.gpr[" << rA << "] = (uint32_t)((ctx.gpr[" << rB
-          << "] & 0x20) ? ((int32_t)ctx.gpr[" << rS
-          << "] >> 31) : ((int32_t)ctx.gpr[" << rS << "] >> (ctx.gpr[" << rB
-          << "] & 0x1F))); // sraw\n";
+      out << "    { int32_t src = (int32_t)ctx.gpr[" << rS
+          << "]; uint32_t sh = ctx.gpr[" << rB << "] & 63;\n";
+      out << "      ctx.gpr[" << rA << "] = (uint32_t)(src >> (sh >= 32 ? 31 : sh));\n";
+      out << "      bool ca = src < 0 && (sh >= 32 || "
+             "(sh != 0 && ((uint32_t)src & ((1u << sh) - 1)) != 0));\n";
+      out << "      ctx.xer = (ctx.xer & ~0x20000000u) | ((uint32_t)ca << 29); } // sraw\n";
       if (ppc_inst.value() & 1) {
         out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rA
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rA
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rA << "] == 0);\n";
+        out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
     } else if (xo == 26) {
       out << "    ctx.gpr[" << rA << "] = ctx.gpr[" << rS
@@ -2292,8 +2301,7 @@ void Recompiler::emit_instruction(std::ostream &out,
     } else if (xo == 535) { 
       uint32_t frD2 = ppc_inst.rd();
       out << "    ctx.fpr[" << frD2 << "] = ctx.ps1[" << frD2
-          << "] = (double)ctx.mmu.read_f32(ctx.gpr[" << rA << "] + ctx.gpr["
-          << rB << "]); // lfsx (both PS lanes)\n";
+          << "] = (double)ctx.mmu.read_f32(" << indexed_ea << "); // lfsx (both PS lanes)\n";
     } else if (xo == 567) { 
       uint32_t frD2 = ppc_inst.rd();
       out << "    { uint32_t ea = ctx.gpr[" << rA << "] + ctx.gpr[" << rB
@@ -2303,8 +2311,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "ctx.gpr[" << rA << "] = ea; } // lfsux (both PS lanes)\n";
     } else if (xo == 599) { 
       uint32_t frD2 = ppc_inst.rd();
-      out << "    ctx.fpr[" << frD2 << "] = ctx.mmu.read_f64(ctx.gpr[" << rA
-          << "] + ctx.gpr[" << rB << "]); // lfdx\n";
+      out << "    ctx.fpr[" << frD2 << "] = ctx.mmu.read_f64(" << indexed_ea << "); // lfdx\n";
     } else if (xo == 631) { 
       uint32_t frD2 = ppc_inst.rd();
       out << "    { uint32_t ea = ctx.gpr[" << rA << "] + ctx.gpr[" << rB
@@ -2312,34 +2319,32 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "ctx.fpr[" << frD2 << "] = ctx.mmu.read_f64(ea); ";
       out << "ctx.gpr[" << rA << "] = ea; } // lfdux\n";
     } else if (xo == 663) { 
-      out << "    ctx.mmu.write_f32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], (float)ctx.fpr[" << ppc_inst.rs() << "]); // stfsx\n";
+      out << "    ctx.mmu.write_f32(" << indexed_ea
+          << ", (float)ctx.fpr[" << ppc_inst.rs() << "]); // stfsx\n";
     } else if (xo == 695) { 
       out << "    ctx.mmu.write_f32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
           << "], (float)ctx.fpr[" << ppc_inst.rs() << "]); // stfsux\n";
       out << "    ctx.gpr[" << rA << "] += ctx.gpr[" << rB << "];\n";
     } else if (xo == 727) { 
-      out << "    ctx.mmu.write_f64(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], ctx.fpr[" << ppc_inst.rs() << "]); // stfdx\n";
+      out << "    ctx.mmu.write_f64(" << indexed_ea
+          << ", ctx.fpr[" << ppc_inst.rs() << "]); // stfdx\n";
     } else if (xo == 759) { 
       out << "    ctx.mmu.write_f64(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
           << "], ctx.fpr[" << ppc_inst.rs() << "]); // stfdux\n";
       out << "    ctx.gpr[" << rA << "] += ctx.gpr[" << rB << "];\n";
     } else if (xo == 983) { 
-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], (uint32_t)(int32_t)ctx.fpr[" << ppc_inst.rs()
-          << "]); // stfiwx\n";
+      out << "    ctx.mmu.write32(" << indexed_ea
+          << ", (uint32_t)std::bit_cast<uint64_t>(ctx.fpr[" << ppc_inst.rs()
+          << "])); // stfiwx: store the low word of the FPR bits\n";
     } else if (xo == 790) { 
-      out << "    { uint16_t v = ctx.mmu.read16(ctx.gpr[" << rA
-          << "] + ctx.gpr[" << rB << "]); ctx.gpr[" << rD
+      out << "    { uint16_t v = ctx.mmu.read16(" << indexed_ea << "); ctx.gpr[" << rD
           << "] = ((v&0xFF)<<8)|((v>>8)&0xFF); } // lhbrx\n";
     } else if (xo == 534) { 
-      out << "    { uint32_t v = ctx.mmu.read32(ctx.gpr[" << rA
-          << "] + ctx.gpr[" << rB << "]); ctx.gpr[" << rD
+      out << "    { uint32_t v = ctx.mmu.read32(" << indexed_ea << "); ctx.gpr[" << rD
           << "] = __builtin_bswap32(v); } // lwbrx\n";
     } else if (xo == 662) { 
-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], __builtin_bswap32(ctx.gpr[" << ppc_inst.rs()
+      out << "    ctx.mmu.write32(" << indexed_ea
+          << ", __builtin_bswap32(ctx.gpr[" << ppc_inst.rs()
           << "])); // stwbrx\n";
     } else if (xo == 1014) { 
       out << "    // dcbz (data cache block zero) - stub\n";
@@ -2356,8 +2361,8 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "        ctx.gpr[" << rA << "] = ea;\n";
       out << "    } // stwux\n";
     } else if (xo == 918) { 
-      out << "    ctx.mmu.write16(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], ((ctx.gpr[" << ppc_inst.rs() << "] & 0xFF) << 8) | ((ctx.gpr["
+      out << "    ctx.mmu.write16(" << indexed_ea
+          << ", ((ctx.gpr[" << ppc_inst.rs() << "] & 0xFF) << 8) | ((ctx.gpr["
           << ppc_inst.rs() << "] >> 8) & 0xFF)); // sthbrx\n";
     } else if (xo == 595 || xo == 210) { 
       out << "    // mfsr/mtsr stub\n";
@@ -2418,20 +2423,27 @@ void Recompiler::emit_instruction(std::ostream &out,
   } else if (ppc_inst.opcode() == 29) { 
     out << "    ctx.gpr[" << ppc_inst.ra() << "] = ctx.gpr[" << ppc_inst.rs()
         << "] & " << (ppc_inst.uimm() << 16) << "; // andis.\n";
+    out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << ppc_inst.ra() << "] < 0);\n";
+    out << "    ctx.cr[0].gt = ((int32_t)ctx.gpr[" << ppc_inst.ra() << "] > 0);\n";
+    out << "    ctx.cr[0].eq = (ctx.gpr[" << ppc_inst.ra() << "] == 0);\n";
+    out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
   } else if (ppc_inst.opcode() == 7) { 
     out << "    ctx.gpr[" << ppc_inst.rd() << "] = (uint32_t)((int32_t)ctx.gpr["
         << ppc_inst.ra() << "] * " << ppc_inst.simm() << "); // mulli\n";
-  } else if (ppc_inst.opcode() == 8) { 
-    out << "    ctx.gpr[" << ppc_inst.rd() << "] = (uint32_t)("
-        << ppc_inst.simm() << " - (int32_t)ctx.gpr[" << ppc_inst.ra()
-        << "]); // subfic\n";
+  } else if (ppc_inst.opcode() == 8) {
+    const uint32_t rd = ppc_inst.rd(), ra = ppc_inst.ra();
+    out << "    { uint64_t sum = (uint64_t)(~ctx.gpr[" << ra
+        << "]) + " << (uint32_t)(int32_t)ppc_inst.simm() << "ull + 1;\n";
+    out << "      ctx.gpr[" << rd << "] = (uint32_t)sum;\n";
+    out << "      ctx.xer = (ctx.xer & ~0x20000000u) | "
+           "((uint32_t)(sum >> 32) << 29); } // subfic\n";
   } else if (ppc_inst.opcode() == 12) { 
     uint32_t rD = ppc_inst.rd();
     uint32_t rA = ppc_inst.ra();
     int32_t simm = ppc_inst.simm();
     out << "    {\n";
-    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << simm
-        << ";\n";
+    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << (uint32_t)simm
+        << "ull;\n";
     out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
     out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
            "29); // CA\n";
@@ -2441,8 +2453,8 @@ void Recompiler::emit_instruction(std::ostream &out,
     uint32_t rA = ppc_inst.ra();
     int32_t simm = ppc_inst.simm();
     out << "    {\n";
-    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << simm
-        << ";\n";
+    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << (uint32_t)simm
+        << "ull;\n";
     out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
     out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
            "29); // CA\n";
@@ -2470,7 +2482,24 @@ void Recompiler::emit_instruction(std::ostream &out,
     uint32_t frB = ppc_inst.rb();
     uint32_t frC = ppc_inst.rc();
 
-    if (xo == 21) {
+    // Indexed quantized loads/stores use a six-bit XO; W and I are
+    // separate fields, not part of the arithmetic paired-single opcode.
+    const uint32_t xo_6 = (inst.opcode >> 1) & 0x3F;
+    if (xo_6 == 6 || xo_6 == 7 || xo_6 == 38 || xo_6 == 39) {
+      const uint32_t ra = ppc_inst.ra(), rb = ppc_inst.rb();
+      const uint32_t w = (inst.opcode >> 10) & 1;
+      const uint32_t i = (inst.opcode >> 7) & 7;
+      const bool update = (xo_6 & 32) != 0;
+      const bool store = (xo_6 & 1) != 0;
+      out << "    { uint32_t ea = ";
+      if (ra != 0 || update) out << "ctx.gpr[" << ra << "] + ";
+      out << "ctx.gpr[" << rb << "]; ctx.psq_"
+          << (store ? "store" : "load") << "(" << frD << ", ea, "
+          << w << ", " << i << ");";
+      if (update) out << " ctx.gpr[" << ra << "] = ea;";
+      out << " } // psq_" << (store ? "st" : "l")
+          << (update ? "ux" : "x") << "\n";
+    } else if (xo == 21) {
       out << "    ctx.ps_add(" << frD << ", " << frA << ", " << frB << ");\n";
     } else if (xo == 20) {
       out << "    ctx.ps_sub(" << frD << ", " << frA << ", " << frB << ");\n";
@@ -2543,6 +2572,10 @@ void Recompiler::emit_instruction(std::ostream &out,
           << ");\n";
     } else if (xo_10 == 1014) {
       out << "    // dcbz_l (no-op)\n";
+    } else if (xo == 26) {
+      out << "    ctx.fpr[" << frD << "] = 1.0 / std::sqrt(ctx.fpr[" << frB
+          << "]); ctx.ps1[" << frD << "] = 1.0 / std::sqrt(ctx.ps1[" << frB
+          << "]); // ps_rsqrte\n";
     } else {
       out << "    std::cerr << \"UNIMPLEMENTED Opcode 4 (ps_*) XO \" << " << xo
           << " << \" XO_10 \" << " << xo_10

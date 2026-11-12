@@ -22,6 +22,10 @@ struct RecompilerConfig {
 
     std::map<uint32_t, std::string> hle_hooks;
 
+    // Explicit per-title C++ replacements; labels and instruction accounting
+    // are retained so interrupted functions can still resume at patched sites.
+    std::map<uint32_t, std::string> instruction_overrides;
+
     
 
     struct RelAot { std::string path; uint32_t module_base; uint32_t bss_base; };

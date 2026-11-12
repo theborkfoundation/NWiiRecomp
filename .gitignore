@@ -43,6 +43,10 @@ log.txt
 *.ini
 *.txt
 *.log
+# Per-game quirk profiles are runtime input, not user configuration.
+!nWiiRuntime/assets/games/*.toml
+# Tracked example config for the recompiler.
+!examples/*.toml
 # Auto-downloaded by CMake (file(DOWNLOAD) in CMakeLists.txt); not committed.
 third_party/dolphin-sigdb/totaldb.dsy
 

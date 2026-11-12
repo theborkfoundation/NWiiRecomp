@@ -303,6 +303,9 @@ int main(int argc, char **argv) {
   nwii::loader::Executable exe;
   if (!exe.load_unpacked_game(argv[1]))
     return 1;
+  // The game id (and therefore the per-game quirk profile) is only known once
+  // boot.bin has been read.
+  nwii::runtime::Config::get().load_game_profile();
 
   uint32_t arena_lo = 0x80000000;
   
@@ -909,6 +912,16 @@ int main(int argc, char **argv) {
   if (cpu_thread.joinable())
     cpu_thread.join();
 
+  if (const char* prefix = std::getenv("NWII_MEMDUMP")) {
+    for (int bank = 0; bank < 2; ++bank) {
+      auto& memory = bank ? ctx->mmu.mem2 : ctx->mmu.mem1;
+      std::string name = std::string(prefix) + (bank ? ".mem2" : ".mem1");
+      if (FILE* f = std::fopen(name.c_str(), "wb")) {
+        std::fwrite(memory.data(), 1, memory.size(), f);
+        std::fclose(f);
+      }
+    }
+  }
   nwii::runtime::shutdown();
   nwii::runtime::diag::report("exit", true);
   if (const char *strict = std::getenv("NWII_STRICT");

@@ -1,0 +1,12 @@
+# Rayman Origins (SOJE41)
+
+[quirks]
+# The game's Bink decoder writes the movie's YUV planes as linear rows, and the
+# engine samples them directly as GX textures. Decoding them in GX tile order
+# repeats each frame four times across and interleaves scanlines.
+linear_i8 = true
+
+# The chroma planes are 128-centred. The engine's four-stage TEV setup carries
+# no bias of its own, so sample the reduced planes with -0.5 applied; without it
+# red and blue saturate and the whole video is tinted magenta.
+chroma_bias_i8 = true

@@ -1,4 +1,5 @@
 #include "runtime/texture_cache_gl.h"
+#include "runtime/config.h"
 #include "runtime/diagnostics.h"
 #include <iostream>
 #include <cstring>
@@ -293,7 +294,18 @@ void TextureCache::decode_i4(CPUContext& ctx, uint32_t addr, uint32_t width, uin
 }
 
 void TextureCache::decode_i8(CPUContext& ctx, uint32_t addr, uint32_t width, uint32_t height, Color* out) {
-    
+    // Some engines' Bink decoders write their YUV planes as plain linear rows
+    // rather than in GX tile order; decoding those as tiled repeats the frame
+    // (4x across at 640 px) and interleaves scanlines. Opt in per game.
+    if (Config::get().game_profile.linear_i8) {
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x++) {
+                uint8_t i = ctx.mmu.read8(addr + y * width + x);
+                out[y * width + x] = {i, i, i, i};
+            }
+        }
+        return;
+    }
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t offset = get_tile_address(x, y, 8, 4, 8, width);

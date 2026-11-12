@@ -71,9 +71,17 @@ uint32_t g_watch_addr = []() -> uint32_t {
   return env ? (uint32_t)std::strtoul(env, nullptr, 16) : 0;
 }();
 
+uint32_t g_watch_len = []() -> uint32_t {
+  const char *env = std::getenv("NWII_WATCHLEN");
+  return env ? (uint32_t)std::strtoul(env, nullptr, 16) : 4;
+}();
+
 extern CPUContext *g_ctx_ptr;
 
 void watch_hit(uint32_t addr, uint32_t value, int width) {
+  static const bool nonzero_only = std::getenv("NWII_WATCH_NZ") != nullptr;
+  if (nonzero_only && value == 0)
+    return;
   CPUContext *c = g_ctx_ptr;
   std::cout << "[Watch] write" << width << " 0x" << std::hex << addr << " = 0x"
             << value;
@@ -116,6 +124,19 @@ void note_null_call(uint32_t site, uint32_t lr) {
 }
 
 void trace_call(uint32_t func_addr, CPUContext &ctx) {
+  // Optional address-range filter (NWII_TRACE_RANGE=lo-hi, hex) so a busy
+  // library region can be traced without logging every call in the game.
+  static const uint32_t range_lo = []() -> uint32_t {
+    const char *e = std::getenv("NWII_TRACE_RANGE");
+    return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0;
+  }();
+  static const uint32_t range_hi = []() -> uint32_t {
+    const char *e = std::getenv("NWII_TRACE_RANGE");
+    if (!e) return 0;
+    const char *dash = std::strchr(e, '-');
+    return dash ? (uint32_t)std::strtoul(dash + 1, nullptr, 16) : 0;
+  }();
+  if (range_lo && (func_addr < range_lo || func_addr > range_hi)) return;
   if (g_trace_recent_enabled) {
     g_recent_calls[g_recent_pos] = {func_addr, ctx.lr, ctx.gpr[3], ctx.gpr[4],
                                     ctx.gpr[13]};

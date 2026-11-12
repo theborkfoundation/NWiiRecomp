@@ -620,10 +620,29 @@ static void SetupDrawState(const GXCommand &cmd) {
   float kcolor[16] = {0};
   float color[16] = {0};
 
+  // glCopyTexImage2D stores the EFB bottom-up (GL convention), while guest
+  // textures are uploaded top-down. Sampling an EFB-backed texture with plain
+  // guest UVs therefore flips it vertically. Detect the stages that sample an
+  // EFB copy and flip V for their texture coordinate.
+  bool flip_coord[8] = {false};
+  for (int s = 0; s < g_state.numTevStages && s < 16; ++s) {
+    const int map = g_state.tevStages[s].texMap;
+    if (map >= 0 && map < 8 &&
+        nwii::runtime::hle::TextureCache::get().find_efb_texture(
+            g_state.texStages[map].base_addr))
+      flip_coord[g_state.tevStages[s].texCoord & 7] = true;
+  }
+
   for (int i = 0; i < 8; i++) {
     if (s_active_shader.uTexMtx[i] >= 0) {
       float mat[16] = {0};
-      mat[0] = mat[5] = mat[10] = mat[15] = 1.0f;
+      mat[0] = mat[10] = mat[15] = 1.0f;
+      if (flip_coord[i]) {
+        mat[5] = -1.0f;
+        mat[13] = 1.0f;
+      } else {
+        mat[5] = 1.0f;
+      }
       glUniformMatrix4fv(s_active_shader.uTexMtx[i], 1, GL_FALSE, mat);
     }
   }
@@ -850,6 +869,9 @@ public:
           // draw samples whatever the last presenter bound. Eight binds per draw
           // is cheaper than getting that wrong.
           for (int i = 0; i < 8; ++i) {
+            // Select the unit before the cache lookup: get_texture() creates
+            // and binds textures on the current active unit.
+            glActiveTexture(GL_TEXTURE0 + i);
             GLuint want = 0;
             const auto &stage = g_state.texStages[i];
             if (!no_tex && stage.base_addr != 0 && stage.width > 0 &&

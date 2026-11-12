@@ -33,6 +33,13 @@ struct GameProfile {
     
 
     uint32_t sched_lock_offset = 0;
+
+    // The Bink decoder in this engine writes its YUV planes as linear rows and
+    // the title samples them as GX textures. Decode I8 linearly for this game.
+    bool linear_i8 = false;
+    // Its chroma planes are 128-centred and the TEV setup has no bias, so the
+    // half-range offset has to be applied when the plane is sampled.
+    bool chroma_bias_i8 = false;
 };
 
 class Config {

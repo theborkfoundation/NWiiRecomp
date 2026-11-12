@@ -91,6 +91,11 @@ target_include_directories(nwiiruntime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# Game profiles are looked up as assets/games/<game id>.toml relative to the
+# working directory. Place them next to the built executable so a run from the
+# build directory finds them.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/assets DESTINATION ${CMAKE_BINARY_DIR})
+
 # add_executable(nwiiruntime_exe src/main.cpp)
 # target_link_libraries(nwiiruntime_exe PRIVATE nwiiruntime)
 

@@ -1,4 +1,6 @@
 #include "runtime/gx/tev_shader_gen.h"
+#include "runtime/config.h"
+#include <algorithm>
 #include <sstream>
 #include <cstdlib>
 #include <cstdio>
@@ -145,6 +147,20 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     
     uint8_t numTevs = state.numTevStages;
     if (numTevs == 0) numTevs = 1;
+
+    // Subsampled chroma: when a draw mixes full-resolution and reduced I8
+    // intensity planes, the smaller ones are 128-centred chroma. Their half
+    // range bias has to be removed before the combiner (the TEV setup in this
+    // engine carries no bias of its own). Opt in per game.
+    uint32_t max_i8_height = 0;
+    if (Config::get().game_profile.chroma_bias_i8) {
+        for (int i = 0; i < numTevs; ++i) {
+            const int m = state.tevStages[i].texMap;
+            if (m >= 0 && m < 8 && state.texStages[m].format == 1)
+                max_i8_height = std::max(max_i8_height,
+                                         state.texStages[m].height);
+        }
+    }
     
     for (int i = 0; i < numTevs; ++i) {
         const auto& stage = state.tevStages[i];
@@ -161,10 +177,30 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
 
         if (stage.texMap != 0xFF) {
             fs << "    texColor = texture(uTex" << (int)stage.texMap << ", vTex" << (int)stage.texCoord << ");\n";
+            const auto &ts = state.texStages[stage.texMap & 7];
+            if (max_i8_height && ts.format == 1 && ts.height < max_i8_height)
+                fs << "    texColor -= vec4(0.5);\n";
         } else {
             fs << "    texColor = vec4(1.0);\n";
         }
         
+        // TEV swap tables route any input channel to any output channel.
+        // Rayman stores glyph/cutout opacity in a CMPR texture's red channel
+        // and selects RRRR, so sampling its unswapped alpha makes every quad
+        // opaque even though the mask texture itself is correct.
+        auto swap_suffix = [&](uint32_t table) {
+            const uint32_t rg = state.bp[0xF6 + table * 2];
+            const uint32_t ba = state.bp[0xF7 + table * 2];
+            const char* channels = "rgba";
+            std::string result;
+            result += channels[rg & 3]; result += channels[(rg >> 2) & 3];
+            result += channels[ba & 3]; result += channels[(ba >> 2) & 3];
+            return result;
+        };
+        const uint32_t alpha_env = state.bp[0xC1 + i * 2];
+        fs << "    rasColor = rasColor." << swap_suffix(alpha_env & 3) << ";\n";
+        fs << "    texColor = texColor." << swap_suffix((alpha_env >> 2) & 3) << ";\n";
+
         uint32_t ksel_reg = state.bp[0xF6 + (i / 2)];
         int kcsel = 0, kasel = 0;
         if ((i % 2) == 0) {

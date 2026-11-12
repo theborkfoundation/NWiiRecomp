@@ -15,8 +15,8 @@ extern CPUContext *g_ctx_ptr;
 
 namespace nwii::runtime::hw {
 
-static uint16_t g_cp_cr = 0;
-static uint16_t g_cp_sr = 0;
+static std::atomic<uint16_t> g_cp_cr{0};
+static std::atomic<uint16_t> g_cp_sr{0};
 static uint16_t g_cp_clear = 0;
 static uint32_t g_cp_fifo_base = 0;
 static uint32_t g_cp_fifo_end = 0;
@@ -28,14 +28,26 @@ static uint32_t g_cp_fifo_rp = 0;
 static uint32_t g_cp_fifo_bp = 0;
 static uint64_t g_cp_drained_total = 0;
 
+static void cp_update_interrupt() {
+    uint16_t sr = g_cp_sr.load(), cr = g_cp_cr.load();
+    bool pending = ((sr & 1) && (cr & 4)) ||
+                   ((sr & 2) && (cr & 8)) ||
+                   ((sr & 16) && (cr & 32));
+    if (pending) trigger_pi_interrupt(0x800);
+    else clear_pi_interrupt(0x800);
+}
+
+static void cp_write_control(uint16_t val) {
+    g_cp_cr = val;
+    // Bit 1 enables breakpoint comparison. Bit 4 links CPU/GP FIFOs;
+    // writing it must not acknowledge a breakpoint.
+    if (!(val & 2)) g_cp_sr &= uint16_t(~0x10u);
+    cp_update_interrupt();
+}
+
 void cp_signal_draw_done() {
-    static int n = 0;
-    if (n++ < 10) {
-        std::cout << "[CP] signal_draw_done -> trigger interrupt 17 (0x4000)\n";
-    }
-    g_cp_sr |= 0x12; // Breakpoint / Draw done flag in CP_SR (bit 4) + Underflow flag (bit 1)
-    pi_intmr |= 0x4000;
-    trigger_pi_interrupt(0x4000);
+    if (g_cp_cr & 2) g_cp_sr |= 0x10;
+    cp_update_interrupt();
 }
 
 void cp_process_fifo() {
@@ -54,7 +66,7 @@ void cp_process_fifo() {
             t0 = now;
             printf("[CPSTAT] %d cr=0x%08X base=0x%08X end=0x%08X wp=0x%08X rp=0x%08X "
                    "hp=0x%08X drained_total=%llu\n",
-                   ++n, g_cp_cr, g_cp_fifo_base, g_cp_fifo_end, g_cp_fifo_wp,
+                   ++n, g_cp_cr.load(), g_cp_fifo_base, g_cp_fifo_end, g_cp_fifo_wp,
                    g_cp_fifo_rp, g_cp_fifo_bp,
                    (unsigned long long)g_cp_drained_total);
         }
@@ -113,8 +125,8 @@ void cp_process_fifo() {
         g_cp_fifo_bp = 0;
         g_cp_sr |= 0x01; // breakpoint
         g_cp_sr |= 0x12; // breakpoint ack / draw done
-        pi_intmr |= 0x4000;
-        trigger_pi_interrupt(0x4000);
+        pi_intmr |= 0x800;
+        trigger_pi_interrupt(0x800);
     }
 
     if (count > 0 && ([](){ static const bool s = (std::getenv("NWII_CPTRACE") != nullptr); return s; })())
@@ -154,23 +166,11 @@ void register_cp(MMIODispatcher &dispatcher) {
                 if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CP] write32 addr=" << std::hex << addr << " val=" << val << "\n";
             if (addr == 0xCC000000) {
                 g_cp_sr = (uint16_t)(val >> 16);
-                g_cp_cr = (uint16_t)val;
-                if (val & 0x10) {
-                    g_cp_sr &= ~0x10;
-                }
-                if ((g_cp_sr & 0x12) == 0) {
-                    clear_pi_interrupt(0x4000);
-                }
+                cp_write_control((uint16_t)val);
                 cp_process_fifo();
             }
             else if (addr == 0xCC000002) {
-                g_cp_cr = (uint16_t)val;
-                if (val & 0x10) {
-                    g_cp_sr &= ~0x10;
-                }
-                if ((g_cp_sr & 0x12) == 0) {
-                    clear_pi_interrupt(0x4000);
-                }
+                cp_write_control((uint16_t)val);
                 cp_process_fifo();
             }
             else if (addr == 0xCC000004) {
@@ -179,7 +179,7 @@ void register_cp(MMIODispatcher &dispatcher) {
                 if (val & 0x02) g_cp_sr &= ~0x02; // clear underflow
                 if (val & 0x10) g_cp_sr &= ~0x10; // clear breakpoint
                 if ((g_cp_sr & 0x13) == 0) {
-                    clear_pi_interrupt(0x4000);
+                    clear_pi_interrupt(0x800);
                 }
             }
             else if (addr == 0xCC000020) { g_cp_fifo_base = val; }
@@ -228,13 +228,7 @@ void register_cp(MMIODispatcher &dispatcher) {
                 if (([](){ static const bool s = (std::getenv("NWII_DEBUG") != nullptr); return s; })()) std::cout << "[CP] write16 addr=" << std::hex << addr << " val=" << val << "\n";
             if (addr == 0xCC000000) { g_cp_sr = val; }
             else if (addr == 0xCC000002) {
-                g_cp_cr = val;
-                if (val & 0x10) {
-                    g_cp_sr &= ~0x10;
-                }
-                if ((g_cp_sr & 0x12) == 0) {
-                    clear_pi_interrupt(0x4000);
-                }
+                cp_write_control((uint16_t)val);
                 cp_process_fifo();
             }
             else if (addr == 0xCC000004) {
@@ -243,7 +237,7 @@ void register_cp(MMIODispatcher &dispatcher) {
                 if (val & 0x02) g_cp_sr &= ~0x02; // clear underflow
                 if (val & 0x10) g_cp_sr &= ~0x10; // clear breakpoint
                 if ((g_cp_sr & 0x13) == 0) {
-                    clear_pi_interrupt(0x4000);
+                    clear_pi_interrupt(0x800);
                 }
             }
             else if (addr == 0xCC000020) { g_cp_fifo_base = (g_cp_fifo_base & 0xFFFF0000) | val; }

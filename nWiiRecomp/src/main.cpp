@@ -24,6 +24,14 @@ int main(int argc, char** argv) {
         config.split_output = tbl["split_output"].value_or(false);
         config.instructions_per_file = tbl["instructions_per_file"].value_or(20000);
 
+        if (auto patches = tbl["instruction_overrides"].as_table()) {
+            for (const auto& [key, val] : *patches) {
+                uint32_t addr = (uint32_t)std::stoul(std::string(key.str()), nullptr, 16);
+                auto code = val.value_or(std::string());
+                if (addr && !code.empty()) config.instruction_overrides[addr] = code;
+            }
+        }
+
         if (auto hooks = tbl["hle_hooks"].as_table()) {
             for (const auto& [key, val] : *hooks) {
                 uint32_t addr = (uint32_t)std::stoul(std::string(key.str()), nullptr, 16);

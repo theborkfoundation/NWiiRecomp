@@ -110,18 +110,18 @@ namespace nwii::runtime {
 void GX_DL_Snapshot(uint32_t addr, uint32_t size) {
     if (!nwii::runtime::g_mmu || size == 0 || size > (8u << 20)) return;
     std::vector<uint8_t> buf(size);
-    if (const uint8_t* p = nwii::runtime::g_mmu->get_ptr(0x80000000u | (addr & 0x03FFFFFF)))
+    if (const uint8_t* p = nwii::runtime::g_mmu->get_ptr(0x80000000u | (addr & 0x3FFFFFFF)))
         std::memcpy(buf.data(), p, size);
     else
         for (uint32_t i = 0; i < size; ++i) buf[i] = nwii::runtime::g_mmu->read8(addr + i);
     std::lock_guard<std::mutex> lk(g_dl_snap_mtx);
     if (g_dl_snap.size() > 1024) g_dl_snap.clear();
-    g_dl_snap[((uint64_t)(addr & 0x03FFFFFF) << 24) ^ size] = std::move(buf);
+    g_dl_snap[((uint64_t)(addr & 0x3FFFFFFF) << 24) ^ size] = std::move(buf);
 }
 
 bool GX_DL_Fetch(uint32_t addr, uint32_t size, std::vector<uint8_t>& out) {
     std::lock_guard<std::mutex> lk(g_dl_snap_mtx);
-    auto it = g_dl_snap.find(((uint64_t)(addr & 0x03FFFFFF) << 24) ^ size);
+    auto it = g_dl_snap.find(((uint64_t)(addr & 0x3FFFFFFF) << 24) ^ size);
     if (it == g_dl_snap.end() || it->second.size() != size) return false;
     out = it->second;
     return true;
@@ -474,29 +474,30 @@ static inline void wgp_push(uint8_t b) {
 
 
 
-// The GX write-gather pipe (0xCC008000) always feeds the CP's command FIFO on
-// real hardware; the PI FIFO registers at 0xCC00300C/10/14 govern a separate PI
-// channel and never divert GX commands. Titles that use the PI FIFO for their
-// own buffers (Rayman Origins does, for in-MEM1 display lists) were therefore
-// having whole blocks of GX commands silently stolen out of the middle of a
-// frame, which desynced the FIFO parser and dropped draws. Keep the diversion
-// available, but opt-in only.
+// PI registers select the CPU write-gather destination. When it differs from
+// the GP command FIFO, GX is recording a display list or uploading vertex RAM.
+// GXRedirectWriteGatherPipe deliberately uses base=0 with a nonzero WP; these
+// bytes must never reach the command parser. Keep a diagnostic opt-out only.
 static bool pip_fifo_redirect_enabled() {
     static const bool on = []() {
         const char *e = std::getenv("NWII_PI_FIFO_REDIRECT");
-        return e && e[0] == '1';
+        return !e || e[0] != '0';
     }();
     return on;
 }
 
 static bool wgp_redirect(uint8_t b) {
+    static uint8_t gather[32];
+    static unsigned count = 0;
+    static uint32_t expected_wp = 0;
+    static bool previous_redirect = false;
     if (!pip_fifo_redirect_enabled()) return false;
     uint32_t base, end, wptr;
     nwii::runtime::hw::pi_fifo_get(base, end, wptr);
-    bool redirect = base != 0;
+    bool redirect = wptr != 0;
     if (redirect) {
         uint32_t cp_base = nwii::runtime::hw::cp_fifo_base_reg();
-        if ((base & 0x03FFFFFF) == (cp_base & 0x03FFFFFF))
+        if ((base & 0x3FFFFFFF) == (cp_base & 0x3FFFFFFF))
             redirect = false;
     }
     if (redirect && !nwii::runtime::g_mmu) redirect = false;
@@ -517,17 +518,29 @@ static bool wgp_redirect(uint8_t b) {
         if (redirect) ++s_bytes;
     }
 
+    if (redirect != previous_redirect || (redirect && wptr != expected_wp)) {
+        // GXFlush pads the final burst with zeros before changing destinations.
+        // The remaining padding is not part of the next buffer's contents.
+        count = 0;
+    }
+    previous_redirect = redirect;
     if (!redirect) return false;
+    expected_wp = wptr;
     {
         static const int kSlot =
             NWII_DIAG_SLOT("wgp.redirected_bytes", diag::Kind::Warn);
         diag::bump(kSlot);
     }
-    nwii::runtime::g_mmu->write8(0x80000000u | (wptr & 0x01FFFFFFu), b);
-    wptr += 1;
-    if ((wptr & 0x03FFFFFF) > (end & 0x03FFFFFF))
-        wptr = base;
-    nwii::runtime::hw::pi_fifo_set_wptr(wptr);
+    gather[count++] = b;
+    if (count == 32) {
+        for (unsigned i = 0; i < 32; ++i)
+            nwii::runtime::g_mmu->write8((0x80000000u | (wptr & 0x3FFFFFFFu)) + i, gather[i]);
+        if ((wptr & 0x3FFFFFFF) == (end & 0x3FFFFFE0)) wptr = base;
+        else wptr += 32;
+        nwii::runtime::hw::pi_fifo_set_wptr(wptr);
+        expected_wp = wptr;
+        count = 0;
+    }
     return true;
 }
 

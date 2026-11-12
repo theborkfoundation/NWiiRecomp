@@ -68,6 +68,12 @@ struct CallbackInfo {
 
 void watch_hit(uint32_t addr, uint32_t value, int width);
 extern uint32_t g_watch_addr;
+extern uint32_t g_watch_len;
+static inline bool watch_contains(uint32_t paddr) {
+  if (g_watch_addr == 0) return false;
+  const uint32_t w = g_watch_addr & 0x3FFFFFFF;
+  return paddr >= w && paddr < w + g_watch_len;
+}
 
 // Strict Dolphin-accurate MMU with inlined fast-path
 struct MMU {
@@ -230,7 +236,7 @@ struct MMU {
   __attribute__((always_inline)) inline void write8(uint32_t addr, uint8_t value) {
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
-      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+      if (watch_contains(paddr))
         watch_hit(addr, value, 8);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -264,7 +270,7 @@ struct MMU {
   __attribute__((always_inline)) inline void write16(uint32_t addr, uint16_t value) {
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
-      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+      if (watch_contains(paddr))
         watch_hit(addr, value, 16);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -301,7 +307,7 @@ struct MMU {
   __attribute__((always_inline)) inline void write32(uint32_t addr, uint32_t value) {
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
-      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+      if (watch_contains(paddr))
         watch_hit(addr, value, 32);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -350,7 +356,7 @@ struct MMU {
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       uint32_t v;
       std::memcpy(&v, &value, 4);
-      if ((paddr & ~3u) == (g_watch_addr & 0x3FFFFFFC))
+      if (watch_contains(paddr))
         watch_hit(addr, v, 32);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -390,7 +396,7 @@ struct MMU {
   __attribute__((always_inline)) inline void write64(uint32_t addr, uint64_t value) {
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
-      if ((paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
+      if (watch_contains(paddr))
         watch_hit(addr, value >> 32, 64);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -434,7 +440,7 @@ struct MMU {
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       uint64_t v;
       std::memcpy(&v, &value, 8);
-      if ((paddr & ~7u) == (g_watch_addr & 0x3FFFFFF8))
+      if (watch_contains(paddr))
         watch_hit(addr, v >> 32, 64);
     }
     if (__builtin_expect(paddr < 0x01800000u, 1)) {
@@ -594,7 +600,7 @@ struct CPUContext {
   void psq_load(uint32_t frD, uint32_t addr, uint32_t W, uint32_t I) {
     uint32_t gqr_val = gqr[I];
     uint32_t ld_type = (gqr_val >> 16) & 0x7;
-    uint32_t ld_scale = (gqr_val >> 24) & 0x3F;
+    int32_t ld_scale = int32_t(gqr_val << 2) >> 26;
     float scale = std::pow(2.0f, -((int)ld_scale));
 
     auto load_element = [&](uint32_t a) -> double {
@@ -628,7 +634,7 @@ struct CPUContext {
   void psq_store(uint32_t frS, uint32_t addr, uint32_t W, uint32_t I) {
     uint32_t gqr_val = gqr[I];
     uint32_t st_type = gqr_val & 0x7;
-    uint32_t st_scale = (gqr_val >> 8) & 0x3F;
+    int32_t st_scale = int32_t(gqr_val << 18) >> 26;
     float scale = std::pow(2.0f, (int)st_scale);
 
     auto store_element = [&](uint32_t a, double val) {
@@ -708,16 +714,18 @@ struct CPUContext {
     ps1[D] = (float)t;
   }
   inline void ps_muls0(uint32_t D, uint32_t A, uint32_t C) {
-    fpr[D] = fpr[A] * fpr[C];
-    ps1[D] = ps1[A] * fpr[C];
+    const double c0 = fpr[C];
+    fpr[D] = fpr[A] * c0;
+    ps1[D] = ps1[A] * c0;
   }
   inline void ps_muls1(uint32_t D, uint32_t A, uint32_t C) {
     fpr[D] = fpr[A] * ps1[C];
     ps1[D] = ps1[A] * ps1[C];
   }
   inline void ps_madds0(uint32_t D, uint32_t A, uint32_t C, uint32_t B) {
-    fpr[D] = std::fma(fpr[A], fpr[C], fpr[B]);
-    ps1[D] = std::fma(ps1[A], fpr[C], ps1[B]);
+    const double c0 = fpr[C];
+    fpr[D] = std::fma(fpr[A], c0, fpr[B]);
+    ps1[D] = std::fma(ps1[A], c0, ps1[B]);
   }
   inline void ps_madds1(uint32_t D, uint32_t A, uint32_t C, uint32_t B) {
     fpr[D] = std::fma(fpr[A], ps1[C], fpr[B]);

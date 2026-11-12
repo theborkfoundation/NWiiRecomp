@@ -151,7 +151,8 @@ struct GXState {
       add_u32(bp[0xF3]); 
       for (int i = 0xC0; i <= 0xDF; ++i) add_u32(bp[i]); 
       for (int i = 0x28; i <= 0x2F; ++i) add_u32(bp[i]); 
-      for (int i = 0xE9; i <= 0xEE; ++i) add_u32(bp[i]); 
+      for (int i = 0xE9; i <= 0xEE; ++i) add_u32(bp[i]);
+      for (int i = 0xF6; i <= 0xFD; ++i) add_u32(bp[i]); // TEV konst selections
 
       for (int i = 0; i < 8; ++i) {
           add_u8(texStages[i].format);

@@ -1,0 +1,17 @@
+# Run nwiirecomp from the repository root. Requires an unpacked SOJE41 dump.
+project_name = "RaymanOrigins"
+input_game_dir = "../games/rayman_origins"
+output_dir = "../export_rayman_origins"
+runtime_source_dir = "nWiiRuntime"
+split_output = true
+instructions_per_file = 20000
+sdk_sigdb = "third_party/dolphin-sigdb/totaldb.dsy"
+
+# SOJE41: the worker can complete before thread creation returns on native CPUs.
+# Publish pending before bctrl; preserve the worker's zero when publishing its handle.
+[instruction_overrides]
+"80566D38" = "ctx.mmu.write32(ctx.gpr[13] - 0x5B80, 1); ctx.ctr = ctx.gpr[12];"
+"80566D40" = "if (ctx.mmu.read32(ctx.gpr[13] - 0x5B80) != 0) ctx.mmu.write32(ctx.gpr[13] - 0x5B80, ctx.gpr[3]);"
+
+# Snapshot a submitted list before CPU buffer reuse; retain the original stb.
+"8008054C" = "nwii::runtime::GX_DL_Snapshot(ctx.gpr[29], ctx.gpr[30]); ctx.mmu.write8(ctx.gpr[3] - 32768, (uint8_t)ctx.gpr[0]);"
