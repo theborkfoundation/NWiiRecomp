@@ -445,6 +445,20 @@ namespace {
 
         const uint8_t* p = nwii::runtime::g_mmu->get_ptr(base);
         if (!p) return true;
+        {
+            static const bool s_attr = std::getenv("NWII_ATTRDBG") != nullptr;
+            if (s_attr &&
+                g_state.texStages[0].base_addr == 0x105A40E0u) {
+                static int an = 0;
+                if (an++ < 10) {
+                    const float *ff = reinterpret_cast<const float *>(p);
+                    std::printf("[ATTR] base=%08X stride=%u idx=%u addr=%08X "
+                                "ncomp=%d f=(%.4f %.4f %.4f %.4f)\n",
+                                array_base, array_stride, index, base, ncomp,
+                                ff[0], ff[1], ff[2], ff[3]);
+                }
+            }
+        }
         float inv = 1.0f / (float)(1 << shift);
         for (int i = 0; i < ncomp; i++) {
             const uint8_t* q = p + (size_t)sz * i;
@@ -799,8 +813,38 @@ void FifoParser::DecodeDraw(GXCommand& c) {
     const DrawRaw& r = *c.raw;
     const std::vector<uint8_t>& buf = r.bytes;
     const size_t buf_size = buf.size();
+    // NWII_LOGOVAT: dump the vertex format actually used by the title-logo
+    // meshes so a mismatched attribute type/shift is visible.
+    static const bool s_logovat = std::getenv("NWII_LOGOVAT") != nullptr;
+    if (s_logovat &&
+        (r.count == 264 || r.count == 576)) {
+        static int vn = 0;
+        if (vn++ < 8)
+            std::printf("[LOGOVAT] n=%u stream=%zu bytes/vert=%.2f "
+                        "pos(mask=%d type=%d shift=%d elem=%d) "
+                        "tex0(mask=%d type=%d shift=%d elem=%d) "
+                        "clr0(mask=%d type=%d elem=%d) nrm(mask=%d elem=%d) "
+                        "arr pos(base=%08X stride=%u) tex0(base=%08X stride=%u)\n",
+                        r.count, buf.size(),
+                        (double)buf.size() / (double)r.count,
+                        (int)r.vat.posMask, (int)r.vat.posType,
+                        (int)r.vat.posShift, (int)r.vat.posElements,
+                        (int)r.vat.texMask[0], (int)r.vat.texType[0],
+                        (int)r.vat.texShift[0], (int)r.vat.texElements[0],
+                        (int)r.vat.clrMask[0], (int)r.vat.clrType[0],
+                        (int)r.vat.clrElements[0], (int)r.vat.nrmMask,
+                        (int)r.vat.nrmElements, r.arrayBase[0],
+                        (unsigned)r.arrayStride[0], r.arrayBase[4],
+                        (unsigned)r.arrayStride[4]);
+    }
     size_t off = 0;
     c.vertices.reserve(r.count);
+    // NWII_NOCOLORIDX: experiment — when the vertex stream is exactly two bytes
+    // per vertex (position index + texcoord index), the colour index the VAT
+    // claims is not really there; consuming it desyncs every following vertex.
+    const bool skip_clr_idx =
+        std::getenv("NWII_NOCOLORIDX") != nullptr &&
+        (size_t)r.count * 2 == buf_size;
     for (uint32_t i = 0; i < r.count; i++) {
         VertexData vtx;
         vtx.posMtxIdx = r.defPosMtxIdx;
@@ -853,7 +897,7 @@ void FifoParser::DecodeDraw(GXCommand& c) {
                              r.vat.nrmElements ? 9 : 3, false);
             if (nrm_idx3) off += 2 * nrm_idx_bytes;
         }
-        if (r.vat.clrMask[0] != VtxAttrMask::None) {
+        if (r.vat.clrMask[0] != VtxAttrMask::None && !skip_clr_idx) {
             float col[4];
             if (!ReadColorAttr(buf, off, buf_size, r.vat.clrMask[0],
                                r.vat.clrType[0], r.arrayBase[2],
@@ -863,7 +907,8 @@ void FifoParser::DecodeDraw(GXCommand& c) {
             vtx.color[0] = col[0]; vtx.color[1] = col[1];
             vtx.color[2] = col[2]; vtx.color[3] = col[3];
         }
-        off += AttrBytes(r.vat.clrMask[1], r.vat.clrType[1], 1, true);
+        if (!skip_clr_idx)
+            off += AttrBytes(r.vat.clrMask[1], r.vat.clrType[1], 1, true);
         if (r.vat.texMask[0] != VtxAttrMask::None) {
             vtx.has_tex[0] = true;
             if (!ReadVectorAttr(buf, off, buf_size, r.vat.texMask[0],
@@ -877,6 +922,97 @@ void FifoParser::DecodeDraw(GXCommand& c) {
                              r.vat.texElements[t] ? 2 : 1, false);
         if (off > buf_size)
             return;
+
+        // NWII_LOGORAW: raw (pre-matrix) position/uv of the letters mesh.
+        static const bool s_logoraw = std::getenv("NWII_LOGORAW") != nullptr;
+        if (s_logoraw && r.count == 312) {
+            static int rn = 0;
+            if (rn == 0) {
+                std::printf("[LOGOMTX2] defPosMtxIdx=%u snap=%zu have=%d "
+                            "m=(%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | "
+                            "%.3f %.3f %.3f %.3f)\n",
+                            (unsigned)r.defPosMtxIdx, r.snap_pos_bank.size(),
+                            (int)r.have_snap_mtx, r.snap_pos_mtx[0],
+                            r.snap_pos_mtx[1], r.snap_pos_mtx[2],
+                            r.snap_pos_mtx[3], r.snap_pos_mtx[4],
+                            r.snap_pos_mtx[5], r.snap_pos_mtx[6],
+                            r.snap_pos_mtx[7], r.snap_pos_mtx[8],
+                            r.snap_pos_mtx[9], r.snap_pos_mtx[10],
+                            r.snap_pos_mtx[11]);
+                std::printf("[LOGOLIVE] parse=(%.3f %.3f %.3f %.3f | %.3f %.3f "
+                            "%.3f %.3f) live=(%.3f %.3f %.3f %.3f | %.3f %.3f "
+                            "%.3f %.3f)\n",
+                            g_parse_posmtx[0], g_parse_posmtx[1],
+                            g_parse_posmtx[2], g_parse_posmtx[3],
+                            g_parse_posmtx[4], g_parse_posmtx[5],
+                            g_parse_posmtx[6], g_parse_posmtx[7],
+                            g_state.posMatrices[0], g_state.posMatrices[1],
+                            g_state.posMatrices[2], g_state.posMatrices[3],
+                            g_state.posMatrices[4], g_state.posMatrices[5],
+                            g_state.posMatrices[6], g_state.posMatrices[7]);
+                std::printf("[LOGOWRAP] tex0 wrap_s=%u wrap_t=%u bp80=%06X "
+                            "bp81=%06X bp82=%06X bp83=%06X\n",
+                            (unsigned)g_state.texStages[0].wrap_s,
+                            (unsigned)g_state.texStages[0].wrap_t,
+                            g_state.bp[0x80], g_state.bp[0x81], g_state.bp[0x82],
+                            g_state.bp[0x83]);
+                if (i == 0) {
+                    std::printf("[LOGOIDX] bytes:");
+                    for (size_t b = 0; b < 12 && b < buf.size(); ++b)
+                        std::printf(" %02X", buf[b]);
+                    std::printf(" | stream=%zu count=%u bytes/vert=%.2f\n",
+                                buf.size(), r.count,
+                                (double)buf.size() / (double)r.count);
+                    // Big-endian float reader: guest memory is BE, so a host
+                    // reinterpret_cast would print garbage.
+                    auto bef = [](const uint8_t *q) -> float {
+                        uint32_t w = ((uint32_t)q[0] << 24) |
+                                     ((uint32_t)q[1] << 16) |
+                                     ((uint32_t)q[2] << 8) | q[3];
+                        float f;
+                        std::memcpy(&f, &w, 4);
+                        return f;
+                    };
+                    if (nwii::runtime::g_mmu) {
+                        for (int k = 0; k < 3; ++k) {
+                            const uint8_t *pp = nwii::runtime::g_mmu->get_ptr(
+                                r.arrayBase[0] + (uint32_t)k * r.arrayStride[0]);
+                            const uint8_t *pt = nwii::runtime::g_mmu->get_ptr(
+                                r.arrayBase[4] + (uint32_t)k * r.arrayStride[4]);
+                            if (!pp || !pt) continue;
+                            std::printf("[LOGOENT] i=%d pos=(%.4f %.4f %.4f) "
+                                        "uv=(%.4f %.4f)\n",
+                                        k, bef(pp), bef(pp + 4), bef(pp + 8),
+                                        bef(pt), bef(pt + 4));
+                        }
+                    }
+                }
+            }
+            if (rn < 12) {
+                std::printf("[LOGORAW] i=%u pos=(%.4f,%.4f) uv=(%.4f,%.4f)\n",
+                            i, vtx.pos[0], vtx.pos[1], vtx.tex[0][0],
+                            vtx.tex[0][1]);
+                ++rn;
+            }
+            if (i + 1 == r.count) {
+                int over = 0;
+                for (const auto &vv : c.vertices)
+                    if (vv.has_tex[0] && vv.tex[0][1] > 1.0f) ++over;
+                std::printf("[LOGOVR] n=%u verts_with_v_gt_1=%d\n", r.count, over);
+            }
+        }
+
+        // NWII_LOGOFIT experiment: the letters mesh arrives in its own small
+        // coordinate space. Fit its raw bbox onto the silhouette's view box so
+        // we can tell a transform problem from a geometry problem.
+        static const bool s_logofit =
+            std::getenv("NWII_LOGOFIT") != nullptr && false;
+        if (s_logofit && r.count == 312 && vtx.has_pos) {
+            vtx.pos[0] = 371.2f + (vtx.pos[0] + 11.87f) * (350.0f / 2.1f);
+            vtx.pos[1] = 190.0f + (vtx.pos[1] - 0.2f) * (110.0f / 2.6f);
+            vtx.pos[2] = 0.0f;
+            vtx.pre_xf = true;
+        }
 
         // Transform by the per-draw matrix snapshot (GX 3x4). Doing it here,
         // with the matrix captured at this draw's stream position, fixes the

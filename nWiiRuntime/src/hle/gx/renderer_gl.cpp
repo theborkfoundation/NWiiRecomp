@@ -33,6 +33,8 @@ struct GLShader {
   GLint uTexMtx[8];
   GLint uTevKColor;
   GLint uTevColor;
+  GLint uTexOnly;
+  GLint uDbgColor;
   GLint uProjMtx;
   GLint uMatColor, uAmbColor, uChanCtrl;
   GLint uLightCol, uLightPos, uLightDir, uLightCosAtt, uLightDistAtt;
@@ -490,6 +492,8 @@ static void SetupDrawState(const GXCommand &cmd) {
       sh.uTexMtx[i] = -1;
     }
     sh.uTevColor = sh.uTevKColor = -1;
+    sh.uTexOnly = -1;
+    sh.uDbgColor = -1;
     sh.id =
         CompileShader(src.vertex_source.c_str(), src.fragment_source.c_str());
     static const bool s_shdump2 = std::getenv("NWII_SHADERDUMP") != nullptr;
@@ -531,6 +535,8 @@ static void SetupDrawState(const GXCommand &cmd) {
     sh.uTevColor = glGetUniformLocation(sh.id, "uTevColor[0]");
     if (sh.uTevColor < 0)
       sh.uTevColor = glGetUniformLocation(sh.id, "uTevColor");
+    sh.uTexOnly = glGetUniformLocation(sh.id, "uTexOnly");
+    sh.uDbgColor = glGetUniformLocation(sh.id, "uDbgColor");
     static const bool s_gxtrace3 = std::getenv("NWII_GXTRACE") != nullptr;
     if (s_gxtrace3) {
       static int un = 0;
@@ -633,11 +639,12 @@ static void SetupDrawState(const GXCommand &cmd) {
       flip_coord[g_state.tevStages[s].texCoord & 7] = true;
   }
 
+  static const bool s_flipv = std::getenv("NWII_FLIPV") != nullptr;
   for (int i = 0; i < 8; i++) {
     if (s_active_shader.uTexMtx[i] >= 0) {
       float mat[16] = {0};
       mat[0] = mat[10] = mat[15] = 1.0f;
-      if (flip_coord[i]) {
+      if (flip_coord[i] || s_flipv) {
         mat[5] = -1.0f;
         mat[13] = 1.0f;
       } else {
@@ -673,6 +680,178 @@ static void SetupDrawState(const GXCommand &cmd) {
     }
   }
 
+  // NWII_FRAMEDUMP: capture the complete logo-draw state (BP words, decoded
+  // TEV colours, vertex attributes and the generated shader) in ONE frame so
+  // the pieces can be correlated.
+  static const bool s_framedump = std::getenv("NWII_FRAMEDUMP") != nullptr;
+  if (s_framedump && g_state.texStages[0].base_addr == 0x105A40E0u) {
+    static int fn = 0;
+    if (fn++ < 1) {
+      FILE *f = std::fopen(
+          "/Users/bachnx/Projects/wii-lie/NWiiRecomp/.dev/rayman/frame_dump.txt",
+          "w");
+      if (f) {
+        std::fprintf(f, "n=%zu prim=%02X numTev=%u numTexGens=%u numChans=%u\n",
+                     cmd.vertices.size(), cmd.prim_type,
+                     g_state.numTevStages, g_state.numTexGens,
+                     g_state.numChans);
+        for (int r = 0xC0; r <= 0xDF; ++r)
+          std::fprintf(f, "bp[%02X]=%06X\n", r, g_state.bp[r]);
+        for (int r = 0xE0; r <= 0xE7; ++r)
+          std::fprintf(f, "bp[%02X]=%06X\n", r, g_state.bp[r]);
+        for (int r = 0xF0; r <= 0xFD; ++r)
+          std::fprintf(f, "bp[%02X]=%06X\n", r, g_state.bp[r]);
+        for (int r = 0x50; r <= 0x87; ++r)
+          std::fprintf(f, "cp[%02X]=%08X\n", r, g_state.cp[r]);
+        for (int i = 0; i < 8; ++i)
+          std::fprintf(f,
+                       "vat%d texMask=%d,%d,%d,%d,%d,%d,%d,%d texType=%d,%d "
+                       "texElem=%d,%d\n",
+                       i, (int)g_state.vat[i].texMask[0],
+                       (int)g_state.vat[i].texMask[1],
+                       (int)g_state.vat[i].texMask[2],
+                       (int)g_state.vat[i].texMask[3],
+                       (int)g_state.vat[i].texMask[4],
+                       (int)g_state.vat[i].texMask[5],
+                       (int)g_state.vat[i].texMask[6],
+                       (int)g_state.vat[i].texMask[7],
+                       (int)g_state.vat[i].texType[0],
+                       (int)g_state.vat[i].texType[1],
+                       (int)g_state.vat[i].texElements[0],
+                       (int)g_state.vat[i].texElements[1]);
+        for (int i = 0; i < 8; ++i) {
+          const auto &s = g_state.tevStages[i];
+          std::fprintf(
+              f,
+              "stage%d map=%d coord=%d chan=%d | c A%X B%X C%X D%X bias%d op%d "
+              "clamp%d scale%d reg%d | a A%X B%X C%X D%X bias%d op%d clamp%d "
+              "scale%d reg%d\n",
+              i, s.texMap, s.texCoord, s.colorChan, s.colorInA, s.colorInB,
+              s.colorInC, s.colorInD, s.colorBias, s.colorOp, s.colorClamp,
+              s.colorScale, s.colorRegId, s.alphaInA, s.alphaInB, s.alphaInC,
+              s.alphaInD, s.alphaBias, s.alphaOp, s.alphaClamp, s.alphaScale,
+              s.alphaRegId);
+        }
+        for (int i = 0; i < 4; ++i)
+          std::fprintf(f,
+                       "color%d=(%.3f,%.3f,%.3f,%.3f) konst%d=(%.3f,%.3f,%.3f,"
+                       "%.3f)\n",
+                       i, color[i * 4 + 0], color[i * 4 + 1], color[i * 4 + 2],
+                       color[i * 4 + 3], i, kcolor[i * 4 + 0],
+                       kcolor[i * 4 + 1], kcolor[i * 4 + 2],
+                       kcolor[i * 4 + 3]);
+        for (int t = 0; t < 8; ++t)
+          std::fprintf(f,
+                       "tex%d base=%08X %ux%u fmt=%u present=%d uv0=(%.3f,"
+                       "%.3f) uv3=(%.3f,%.3f)\n",
+                       t, g_state.texStages[t].base_addr,
+                       g_state.texStages[t].width, g_state.texStages[t].height,
+                       (unsigned)g_state.texStages[t].format,
+                       (int)cmd.vertices[0].has_tex[t],
+                       cmd.vertices[0].tex[t][0], cmd.vertices[0].tex[t][1],
+                       cmd.vertices[3].tex[t][0], cmd.vertices[3].tex[t][1]);
+        auto dbg = GenerateTEVShader(g_state, cmd.prim_type);
+        std::fprintf(f, "==== FS ====\n%s\n", dbg.fragment_source.c_str());
+        std::fclose(f);
+        std::fprintf(stderr, "[FRAMEDUMP] wrote frame_dump.txt\n");
+      }
+    }
+  }
+  // NWII_LOGOSUM: per-draw position/UV ranges of the title-logo draws.
+  static const bool s_logosum = std::getenv("NWII_LOGOSUM") != nullptr;
+  if (s_logosum && g_state.texStages[0].base_addr == 0x105A40E0u) {
+    static int dn = 0;
+    if (dn++ < 8) {
+      float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+      float zmin = 1e9f, zmax = -1e9f, umin = 1e9f, umax = -1e9f;
+      float vmin = 1e9f, vmax = -1e9f;
+      int with_uv = 0;
+      for (const auto &vv : cmd.vertices) {
+        xmin = std::fmin(xmin, vv.pos[0]);
+        xmax = std::fmax(xmax, vv.pos[0]);
+        ymin = std::fmin(ymin, vv.pos[1]);
+        ymax = std::fmax(ymax, vv.pos[1]);
+        zmin = std::fmin(zmin, vv.pos[2]);
+        zmax = std::fmax(zmax, vv.pos[2]);
+        if (vv.has_tex[0]) {
+          ++with_uv;
+          umin = std::fmin(umin, vv.tex[0][0]);
+          umax = std::fmax(umax, vv.tex[0][0]);
+          vmin = std::fmin(vmin, vv.tex[0][1]);
+          vmax = std::fmax(vmax, vv.tex[0][1]);
+        }
+      }
+      std::fprintf(stderr,
+                   "[LOGOSUM] n=%zu prim=%02X pos x[%.1f %.1f] y[%.1f %.1f] "
+                   "z[%.1f %.1f] uv0(%d) u[%.4f %.4f] v[%.4f %.4f]\n",
+                   cmd.vertices.size(), cmd.prim_type, xmin, xmax, ymin, ymax,
+                   zmin, zmax, with_uv, umin, umax, vmin, vmax);
+      // Stage-0 texture matrix actually applied on the CPU path.
+      const auto &v0 = cmd.vertices[0];
+      int ti = (int)v0.texMtxIdx[0];
+      const float *mm = &g_state.posMatrices[(size_t)ti * 4];
+      std::fprintf(stderr,
+                   "[LOGOMTX] ti=%d raw=(%.4f,%.4f) m0=(%.4f,%.4f,%.4f,%.4f) "
+                   "m1=(%.4f,%.4f,%.4f,%.4f)\n",
+                   ti, v0.tex[0][0], v0.tex[0][1], mm[0], mm[1], mm[2], mm[3],
+                   mm[4], mm[5], mm[6], mm[7]);
+      // Vertex mutations: uv bands versus position, so a bad uv/pos pairing
+      // (letters landing on the background of the art) is visible directly.
+      int lowv = 0, midv = 0, highv = 0;
+      for (const auto &vv : cmd.vertices) {
+        if (!vv.has_tex[0]) continue;
+        if (vv.tex[0][1] < 0.35f) ++lowv;
+        else if (vv.tex[0][1] < 0.55f) ++midv;
+        else ++highv;
+      }
+      std::fprintf(stderr, "[LOGOUV] n=%zu v<0.35:%d 0.35-0.55:%d >0.55:%d\n",
+                   cmd.vertices.size(), lowv, midv, highv);
+      // Per-band position extents: a collapsed wordmark shows up as a band
+      // whose vertices all sit in a tiny area.
+      for (int band = 0; band < 3; ++band) {
+        float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+        int cnt = 0;
+        for (const auto &vv : cmd.vertices) {
+          if (!vv.has_tex[0]) continue;
+          const float vv_v = vv.tex[0][1];
+          const int b = vv_v < 0.35f ? 0 : (vv_v < 0.55f ? 1 : 2);
+          if (b != band) continue;
+          ++cnt;
+          bx0 = std::fmin(bx0, vv.pos[0]); bx1 = std::fmax(bx1, vv.pos[0]);
+          by0 = std::fmin(by0, vv.pos[1]); by1 = std::fmax(by1, vv.pos[1]);
+        }
+        if (cnt)
+          std::fprintf(stderr,
+                       "[LOGOBAND] n=%zu band=%d cnt=%d x[%.1f %.1f] "
+                       "y[%.1f %.1f]\n",
+                       cmd.vertices.size(), band, cnt, bx0, bx1, by0, by1);
+      }
+      for (size_t k = 0; k < cmd.vertices.size() && k < 8; ++k) {
+        const auto &vv = cmd.vertices[k];
+        std::fprintf(stderr, "[LOGOV] %zu uv=(%.4f,%.4f) pos=(%.1f,%.1f)\n", k,
+                     vv.tex[0][0], vv.tex[0][1], vv.pos[0], vv.pos[1]);
+      }
+      {
+        const int pm = (int)v0.posMtxIdx;
+        const float *pm4 = &g_state.posMatrices[(size_t)pm * 4];
+        std::fprintf(stderr,
+                     "[LOGOPOS] n=%zu posMtxIdx=%d m=(%.3f %.3f %.3f %.3f | "
+                     "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f)\n",
+                     cmd.vertices.size(), pm, pm4[0], pm4[1], pm4[2], pm4[3],
+                     pm4[4], pm4[5], pm4[6], pm4[7], pm4[8], pm4[9], pm4[10],
+                     pm4[11]);
+        std::fprintf(stderr,
+                     "[LOGOPROJ] n=%zu set=%d type=%d proj=(%.3f %.3f %.3f "
+                     "%.3f %.3f %.3f)\n",
+                     cmd.vertices.size(), (int)g_state.projSet,
+                     (int)g_state.projType, g_state.projection[0],
+                     g_state.projection[1], g_state.projection[2],
+                     g_state.projection[3], g_state.projection[4],
+                     g_state.projection[5]);
+      }
+    }
+  }
+
   static const bool s_tevtrace = std::getenv("NWII_TEVTRACE") != nullptr;
   if (s_tevtrace) {
     static int tn = 0;
@@ -687,6 +866,36 @@ static void SetupDrawState(const GXCommand &cmd) {
     glUniform4fv(s_active_shader.uTevKColor, 4, kcolor);
   if (s_active_shader.uTevColor >= 0)
     glUniform4fv(s_active_shader.uTevColor, 4, color);
+
+  // Per-draw texture-only diagnostic, scoped to the title-logo texture.
+  if (s_active_shader.uTexOnly >= 0) {
+    static const bool s_texonly = std::getenv("NWII_TEXONLY") != nullptr;
+    static const bool s_uvvis = std::getenv("NWII_UVVIS") != nullptr;
+    float mode = 0.0f;
+    if (g_state.texStages[0].base_addr == 0x105A40E0u) {
+      if (s_uvvis)
+        mode = 2.0f;
+      else if (s_texonly)
+        mode = 1.0f;
+    }
+    glUniform1f(s_active_shader.uTexOnly, mode);
+  }
+
+  // Per-mesh flat colour so each logo layer's screen coverage is visible.
+  if (s_active_shader.uDbgColor >= 0) {
+    static const bool s_dbglayer = std::getenv("NWII_DBGLAYER") != nullptr;
+    float dc[4] = {0, 0, 0, 0};
+    const size_t dn = cmd.vertices.size();
+    if (s_dbglayer && dn >= 4 &&
+        g_state.texStages[0].base_addr == 0x105A40E0u) {
+      if (dn == 24) { dc[0] = 1; dc[3] = 1; }
+      else if (dn == 72) { dc[1] = 1; dc[3] = 1; }
+      else if (dn == 264) { dc[2] = 1; dc[3] = 1; }
+      else if (dn == 576) { dc[0] = 1; dc[1] = 1; dc[3] = 1; }
+      else if (dn == 312) { dc[0] = 1; dc[2] = 1; dc[3] = 1; }
+    }
+    glUniform4fv(s_active_shader.uDbgColor, 1, dc);
+  }
 }
 
 static void EmitPrimitive(const GXCommand &cmd) {
@@ -886,8 +1095,14 @@ public:
             // texture across the whole screen instead of clamping to the edge.
             static GLint wrap_map[3] = {GL_CLAMP_TO_EDGE, GL_REPEAT,
                                         GL_MIRRORED_REPEAT};
+            static const bool s_force_repeat =
+                std::getenv("NWII_FORCE_REPEAT") != nullptr;
             GLint ws = wrap_map[stage.wrap_s < 3 ? stage.wrap_s : 0];
             GLint wt = wrap_map[stage.wrap_t < 3 ? stage.wrap_t : 0];
+            if (s_force_repeat) {
+              ws = GL_REPEAT;
+              wt = GL_REPEAT;
+            }
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
           }

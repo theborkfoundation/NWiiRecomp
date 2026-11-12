@@ -134,6 +134,9 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     }
     fs << "uniform vec4 uTevColor[4];\n";
     fs << "uniform vec4 uTevKColor[4];\n";
+    // Per-draw diagnostics flag (default 0 = normal TEV output).
+    fs << "uniform float uTexOnly;\n";
+    fs << "uniform vec4 uDbgColor;\n";
     
     fs << "vec4 tevReg[4];\n"; 
     fs << "vec4 texColor;\n";
@@ -342,6 +345,12 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     
     if (std::getenv("NWII_FLATCOLOR"))
         fs << "    FragColor = vec4(1.0, 0.0, 0.0, 1.0);\n";
+
+    // NWII_TEXONLY: per-draw flag (uniform) that bypasses TEV/mask and shows
+    // the raw tex0 mapping, so vertex UVs can be compared with the source art.
+    fs << "    if (uTexOnly > 1.5) { FragColor = vec4(fract(vTex0), 0.0, 1.0); }\n";
+    fs << "    else if (uTexOnly > 0.5) { FragColor = vec4(texture(uTex0, vTex0).rgb, 1.0); }\n";
+    fs << "    if (uDbgColor.a > 0.0) { FragColor = uDbgColor; }\n";
 
     
 
