@@ -19,6 +19,9 @@ else()
         GIT_REPOSITORY https://github.com/Dav1dde/glad.git
         GIT_TAG        v0.1.36
     )
+    # glad v0.1.36 still declares cmake_minimum_required(<3.5), which CMake 4.x
+    # rejects outright. Allow the old policy for this fetched subproject only.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(glad)
 endif()
 

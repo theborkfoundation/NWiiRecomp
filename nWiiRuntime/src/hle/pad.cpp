@@ -92,6 +92,48 @@ void KPADRead(CPUContext& ctx) {
 
 } // extern "C"
 
+// Games that link the WPAD/KPAD libraries statically never call the HLE entry
+// points; their input wrapper polls the guest WPADChannel object directly. Feed
+// that object from the input manager every vblank so the guest sees a
+// connected remote whose buttons match the host input.
+void rvl_feed_input(CPUContext &ctx) {
+    uint32_t ch0 = ctx.mmu.read32(0x806E79B0);
+    if (ch0 < 0x80000000u || ch0 >= 0x81800000u)
+        return;
+
+    WiimoteState st = InputManager::get().get_wiimote_state(0);
+    uint32_t buttons = st.buttons;
+    static const bool force_a = std::getenv("NWII_TESTA") != nullptr;
+    static uint64_t feed_frames = 0;
+    ++feed_frames;
+    // Pulse A (20 frames on, 20 off) so the guest sees repeat trigger edges.
+    if (force_a && ((feed_frames / 20) & 1) == 0)
+        buttons |= 0x0800u; // KPAD_BUTTON_A
+
+    // Connection state: WPAD_ERR_NONE, dev type core, connected.
+    ctx.mmu.write32(ch0 + 2304, 0);
+    ctx.mmu.write8(ch0 + 2309, 0);
+    ctx.mmu.write32(ch0 + 2336, 1);
+    ctx.mmu.write32(ch0 + 2300, 42);
+
+    // The two status slots the game's input wrapper reads.
+    ctx.mmu.write16(ch0 + 160, (uint16_t)buttons);
+    ctx.mmu.write8(ch0 + 160 + 40, 0);
+    ctx.mmu.write8(ch0 + 160 + 41, 0);
+    ctx.mmu.write16(ch0 + 256, (uint16_t)buttons);
+    ctx.mmu.write8(ch0 + 256 + 40, 0);
+    ctx.mmu.write8(ch0 + 256 + 41, 0);
+    ctx.mmu.write8(ch0 + 2316, 0);
+    // 0x80054650 returns (byte at +0x910 != 0); the game's wrapper uses it as
+    // "remote connected / data available".
+    ctx.mmu.write8(ch0 + 2320, 1);
+    ctx.mmu.write8(ch0 + 2321, 1);
+
+    // Rayman Origins controller manager: channel 0 sample requested.
+    if (ctx.mmu.read8(0x8071C068) == 0)
+        ctx.mmu.write8(0x8071C068, 1);
+}
+
 void hle_wpad_probe(CPUContext& ctx) {
     static int n = 0; if (n++ < 5) std::cout << "[hle_wpad_probe] called chan=" << ctx.gpr[3] << std::endl;
     uint32_t chan = ctx.gpr[3];
@@ -143,6 +185,8 @@ void hle_kpad_read_ex(CPUContext& ctx) {
     if (chan == 0 && data_array_ptr >= 0x80000000 && length > 0) {
         WiimoteState state = InputManager::get().get_wiimote_state(0);
         uint32_t buttons = state.buttons;
+        if (std::getenv("NWII_TESTA") && ((s_kpad_reads / 20) & 1) == 0)
+            buttons |= 0x0800u; // pulse A so the guest sees fresh edges
 
         // Scripted button presses, for reaching UI states that are otherwise
         // blocked behind a prompt. The strap/safety screen does not advance on

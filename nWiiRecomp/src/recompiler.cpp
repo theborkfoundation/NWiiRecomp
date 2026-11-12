@@ -276,12 +276,9 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     generated_files.push_back(main_name);
     out.open(config_.output_dir + "/" + main_name);
     emit_headers(out);
-    out << "#if defined(__GNUC__) || defined(__clang__)\n";
-    out << "#pragma GCC optimize (\"O0\")\n";
-    out << "#endif\n";
-    out << "#if defined(__clang__)\n";
-    out << "#pragma clang optimize off\n";
-    out << "#endif\n\n";
+    // The dispatcher used to be a switch with one case per guest instruction,
+    // which was unbuildable at -O3. It is now a small table lookup, so let it
+    // be optimized like everything else.
     out << "#include \"functions.h\"\n\n";
 
     std::string entry_func;
@@ -299,6 +296,41 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
            "void(*func)(CPUContext&); };\n";
     out << "static const FuncBound g_func_bounds[] = {\n";
 
+    // The old dispatch switch listed every branch-link return address,
+    // backward-branch source and jump-table target explicitly. Fold those into
+    // each function's range so one binary search can replace the switch.
+    std::map<uint32_t, uint32_t> cover_end;
+    func_idx = 0;
+    for (const auto &[start_addr, func] : analyzer_.get_functions()) {
+      ++func_idx;
+      bool is_hle = !func.hle_hook_name.empty() ||
+                    is_hle_function(all_base_names[func_idx - 1]);
+      if (is_hle)
+        continue;
+      uint32_t hi = func.end_address;
+      for (const auto &inst : func.instructions) {
+        ppc::Instruction ppc_inst(inst.opcode);
+        if (ppc_inst.is_branch_link() || ppc_inst.opcode() == 17) {
+          uint32_t ret = inst.address + 4;
+          if (ret > hi)
+            hi = ret;
+        }
+        if (ppc_inst.opcode() == 16 || ppc_inst.opcode() == 18) {
+          uint32_t t = ppc_inst.branch_target(inst.address);
+          bool is_local =
+              std::find_if(func.instructions.begin(), func.instructions.end(),
+                           [t](const auto &i) { return i.address == t; }) !=
+              func.instructions.end();
+          if (t <= inst.address && is_local && inst.address + 4 > hi)
+            hi = inst.address + 4;
+        }
+      }
+      for (uint32_t jt : func.jump_table_targets)
+        if (jt + 4 > hi)
+          hi = jt + 4;
+      cover_end[start_addr] = hi;
+    }
+
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
@@ -307,7 +339,7 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
       ++func_idx;
       if (!is_hle) {
         out << "    {0x" << std::hex << std::uppercase << start_addr << ", 0x"
-            << func.end_address << ", " << func_name << "},\n";
+            << cover_end[start_addr] << ", " << func_name << "},\n";
       }
     }
     out << "    {0, 0, nullptr}\n";
@@ -367,85 +399,44 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     out << "        else if ((ctx.pc & 0xF0000000) == 0xD0000000) ctx.pc = "
            "(ctx.pc & 0x0FFFFFFF) | 0x90000000;\n";
     out << "        else if (ctx.pc < 0x80000000) ctx.pc |= 0x80000000;\n";
-    out << "        uint32_t target = ctx.pc;\n        if ((++ctx.inst_count % "
-           "100000) == 0) std::cout << \"Dispatcher PC: 0x\" << std::hex << "
-           "target << std::endl;\n";
+    out << "        uint32_t target = ctx.pc;\n";
     out << "        switch (target) {\n";
-
-    std::set<uint32_t> emitted_cases;
-
+    // HLE functions dispatch by exact address (their bodies live in the
+    // runtime); everything else goes through the range table. Keep this list
+    // tiny: the generated dispatcher is compiled at -O0, so a switch with tens
+    // of thousands of cases is far slower than the O(log n) lookup below.
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
       bool is_hle = !func.hle_hook_name.empty() ||
                     is_hle_function(all_base_names[func_idx]);
       ++func_idx;
-
-      if (emitted_cases.insert(start_addr).second) {
-        if (is_hle) {
-          std::string hle_target =
-              !func.hle_hook_name.empty() ? func.hle_hook_name : func_name;
-          out << "            case 0x" << std::hex << std::uppercase
-              << start_addr << std::dec << ": " << hle_target
-              << "(ctx); ctx.pc = ctx.lr; break;\n";
-        } else {
-          out << "            case 0x" << std::hex << std::uppercase
-              << start_addr << std::dec << ": " << func_name
-              << "(ctx); break;\n";
-        }
-      }
-
-      if (!is_hle) {
-        for (const auto &inst : func.instructions) {
-          ppc::Instruction ppc_inst(inst.opcode);
-          if (ppc_inst.is_branch_link() || ppc_inst.opcode() == 17) {
-            uint32_t ret_addr = inst.address + 4;
-            if (emitted_cases.insert(ret_addr).second) {
-              out << "            case 0x" << std::hex << std::uppercase
-                  << ret_addr << std::dec << ": " << func_name
-                  << "(ctx); break;\n";
-            }
-          }
-          if (ppc_inst.opcode() == 16 || ppc_inst.opcode() == 18) {
-            uint32_t target = ppc_inst.branch_target(inst.address);
-            bool is_local =
-                std::find_if(func.instructions.begin(), func.instructions.end(),
-                             [target](const auto &i) {
-                               return i.address == target;
-                             }) != func.instructions.end();
-            if (target <= inst.address && is_local) {
-              if (emitted_cases.insert(inst.address).second) {
-                out << "            case 0x" << std::hex << std::uppercase
-                    << inst.address << std::dec << ": " << func_name
-                    << "(ctx); break;\n";
-              }
-            }
-          }
-        }
-        for (uint32_t jump_target : func.jump_table_targets) {
-          if (emitted_cases.insert(jump_target).second) {
-            out << "            case 0x" << std::hex << std::uppercase
-                << jump_target << std::dec << ": " << func_name
-                << "(ctx); break;\n";
-          }
-        }
-      }
+      if (!is_hle)
+        continue;
+      std::string hle_target =
+          !func.hle_hook_name.empty() ? func.hle_hook_name : func_name;
+      out << "            case 0x" << std::hex << std::uppercase << start_addr
+          << std::dec << ": " << hle_target
+          << "(ctx); ctx.pc = ctx.lr; break;\n";
     }
     out << "            default: {\n";
-    out << "                bool found = false;\n";
-    out << "                for (const auto& fb : g_func_bounds) {\n";
-    out << "                    if (fb.start == 0) break;\n";
-    out << "                    if (target >= fb.start && target < fb.end) {\n";
-    out << "                        ctx.pc = target;\n";
-    out << "                        fb.func(ctx);\n";
-    out << "                        found = true;\n";
-    out << "                        break;\n";
-    out << "                    }\n";
+    out << "                // g_func_bounds is sorted by start (sentinel last).\n";
+    out << "                size_t lo = 0, hi = sizeof(g_func_bounds) / "
+           "sizeof(g_func_bounds[0]) - 1;\n";
+    out << "                while (lo < hi) {\n";
+    out << "                    size_t mid = (lo + hi) / 2;\n";
+    out << "                    if (g_func_bounds[mid].start <= target) lo = mid + 1;\n";
+    out << "                    else hi = mid;\n";
     out << "                }\n";
-    out << "                if (!found) {\n";
-    out << "                    // Not in any recompiled function: this is\n";
-    out << "                    // runtime-generated code (copied to low mem,\n";
-    out << "                    // trampolines). Interpret it from memory.\n";
+    out << "                const FuncBound *fb = nullptr;\n";
+    out << "                if (lo > 0 && target < g_func_bounds[lo - 1].end)\n";
+    out << "                    fb = &g_func_bounds[lo - 1];\n";
+    out << "                if (fb) {\n";
+    out << "                    ctx.pc = target;\n";
+    out << "                    fb->func(ctx);\n";
+    out << "                } else {\n";
+    out << "                    // Not in any recompiled function: runtime-generated\n";
+    out << "                    // code (copied to low memory, trampolines). Interpret.\n";
     out << "                    nwii::runtime::interpret_step(ctx);\n";
     out << "                }\n";
     out << "            }\n";
@@ -921,6 +912,9 @@ void Recompiler::emit_function(std::ostream &out,
   
   auto hook = config_.hle_hooks.find(func.start_address);
   if (hook != config_.hle_hooks.end()) {
+    // The handler lives in the runtime and is not part of the fixed HLE
+    // declaration list, so declare it at block scope.
+    out << "    extern void " << hook->second << "(CPUContext&);\n";
     out << "    " << hook->second << "(ctx);\n";
     out << "    ctx.pc = ctx.lr; return;\n";
     out << "}\n\n";
@@ -2189,11 +2183,19 @@ void Recompiler::emit_instruction(std::ostream &out,
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rA << "] == 0);\n";
       }
     } else if (xo == 20) { 
-      out << "    ctx.gpr[" << rD << "] = ctx.mmu.read32(ctx.gpr[" << rA
-          << "] + ctx.gpr[" << rB << "]); // lwarx\n";
+      // RA=0 means a zero base; GPR0 is not an operand.
+      if (rA == 0)
+        out << "    ctx.gpr[" << rD << "] = ctx.mmu.read32(ctx.gpr[" << rB
+            << "]); // lwarx\n";
+      else
+        out << "    ctx.gpr[" << rD << "] = ctx.mmu.read32(ctx.gpr[" << rA
+            << "] + ctx.gpr[" << rB << "]); // lwarx\n";
     } else if (xo == 150) { 
-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
-          << "], ctx.gpr[" << ppc_inst.rs() << "]); // stwcx\n";
+      if (rA == 0)
+        out << "    ctx.mmu.write32(ctx.gpr[" << rB << "], ctx.gpr[" << ppc_inst.rs() << "]); // stwcx\n";
+      else
+        out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+            << "], ctx.gpr[" << ppc_inst.rs() << "]); // stwcx\n";
       out << "    ctx.cr[0].eq = true; ctx.cr[0].lt = false; ctx.cr[0].gt = "
              "false; // always succeed\n";
     } else if (xo == 119) { 

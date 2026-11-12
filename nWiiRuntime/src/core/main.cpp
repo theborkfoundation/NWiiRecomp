@@ -250,7 +250,10 @@ int main(int argc, char **argv) {
       std::cout << "[GL] vendor=" << (const char *)glGetString(GL_VENDOR)
                 << " glsl=" << (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION)
                 << "\n";
-      SDL_GL_SetSwapInterval(1);
+      // NWII_NO_VSYNC=1 keeps SDL_GL_SwapWindow from blocking on the display
+      // link; without an active display (locked screen, headless CI) the wait
+      // never completes and the whole guest stalls on vblank.
+      SDL_GL_SetSwapInterval(std::getenv("NWII_NO_VSYNC") ? 0 : 1);
     }
     
     glGenFramebuffers(1, &efb_fbo);
@@ -527,6 +530,47 @@ int main(int argc, char **argv) {
 
   std::thread cpu_thread(cpu_thread_func, ctx.get());
 
+  // NWII_MEMDUMP_TRIGGER=<hex>: when the 32-bit word at that guest address
+  // becomes non-zero, dump both memory banks ("<prefix>.a.*"), then dump them
+  // again 45 vblanks later ("<prefix>.b.*"). Diffing the two dumps shows which
+  // buffers the guest is writing while a subsystem runs (e.g. audio PCM).
+  auto maybe_memdump = [&ctx]() {
+    static const char *prefix = std::getenv("NWII_MEMDUMP");
+    static const char *trig_env = std::getenv("NWII_MEMDUMP_TRIGGER");
+    static uint32_t trig =
+        trig_env ? (uint32_t)std::strtoul(trig_env, nullptr, 16) : 0;
+    static int state = 0;  // 0 waiting, 1 counting down, 2 done
+    static int countdown = 0;
+    if (!prefix || !trig || state == 2)
+      return;
+    auto dump = [&](const char *tag) {
+      for (int bank = 0; bank < 2; ++bank) {
+        auto &mem = bank ? ctx->mmu.mem2 : ctx->mmu.mem1;
+        std::string name = std::string(prefix) + "." + tag +
+                           (bank ? ".mem2" : ".mem1");
+        if (FILE *f = std::fopen(name.c_str(), "wb")) {
+          std::fwrite(mem.data(), 1, mem.size(), f);
+          std::fclose(f);
+        }
+      }
+    };
+    if (state == 0) {
+      if (ctx->mmu.read32(trig) != 0) {
+        dump("a");
+        state = 1;
+        countdown = 45;
+        std::cout << "[MEMDUMP] trigger 0x" << std::hex << trig << std::dec
+                  << " -> " << prefix << ".a.*\n";
+      }
+      return;
+    }
+    if (state == 1 && --countdown <= 0) {
+      dump("b");
+      state = 2;
+      std::cout << "[MEMDUMP] second dump -> " << prefix << ".b.*\n";
+    }
+  };
+
   if (headless) {
     
     uint64_t tick = 0;
@@ -546,6 +590,13 @@ int main(int argc, char **argv) {
         }
       }
       ctx->vblank_pending = true;
+      {
+        // Titles that link WPAD/KPAD statically poll the guest WPADChannel
+        // object; drive it every frame from the host input.
+        extern void rvl_feed_input(nwii::runtime::CPUContext &);
+        rvl_feed_input(*ctx);
+      }
+      maybe_memdump();
       if (std::getenv("NWII_SAMPLE") && (++tick % 60) == 0) {
         std::cout << "[Sample] pc=0x" << std::hex << ctx->pc << " lr=0x"
                   << ctx->lr << " msr=0x" << ctx->msr << " r3=0x" << ctx->gpr[3]
@@ -879,7 +930,8 @@ int main(int argc, char **argv) {
 
         static bool s_vsync_enabled = false;
         extern uint64_t g_stat_draws;
-        if (g_stat_draws > 0 && !s_vsync_enabled) {
+        if (g_stat_draws > 0 && !s_vsync_enabled &&
+            !std::getenv("NWII_NO_VSYNC")) {
           SDL_GL_SetSwapInterval(1);
           s_vsync_enabled = true;
           std::cout << "[Video] Initial loading complete. Switched to 60 FPS VSync." << std::endl;
@@ -896,7 +948,19 @@ int main(int argc, char **argv) {
       }
       
       ctx->vblank_pending = true;
-      if (headless && g_stat_draws > 0) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      {
+        // Titles that link WPAD/KPAD statically poll the guest WPADChannel
+        // object; drive it every frame from the host input.
+        extern void rvl_feed_input(nwii::runtime::CPUContext &);
+        rvl_feed_input(*ctx);
+      }
+      maybe_memdump();
+      if (headless && g_stat_draws > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      else if (std::getenv("NWII_NO_VSYNC"))
+        // With the swap interval disabled nothing paces the loop, so VI would
+        // be raised thousands of times per second. Keep the guest at ~60 Hz.
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     if (!headless) {

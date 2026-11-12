@@ -881,7 +881,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
                 << " bk=" << ctx.backup_stack.size()
                 << " saved=0x" << std::hex << ctx.dispatch_saved_ctx
                 << " cur=0x" << ctx.mmu.read32(0x800000E4)
-                << " d4=0x" << ctx.mmu.read32(0x800000D4) << " msr=0x" << ctx.msr << " imr=0x" << nwii::runtime::hw::pi_intmr.load() << " isr=0x" << nwii::runtime::hw::pi_intsr.load() << std::dec << "\n";
+                     << " d4=0x" << ctx.mmu.read32(0x800000D4) << " msr=0x" << ctx.msr << " imr=0x" << nwii::runtime::hw::pi_intmr.load() << " isr=0x" << nwii::runtime::hw::pi_intsr.load()
+                     << " runq=0x" << (ctx.gpr[13] >= 0x80000000u ? ctx.mmu.read32(ctx.gpr[13] - 24944) : 0u)
+                     << std::dec << "\n";
     }
   }
 
