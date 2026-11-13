@@ -767,6 +767,81 @@ static void SetupDrawState(const GXCommand &cmd) {
       }
     }
   }
+  // NWII_ALLDRAWS: rolling record of the most recent draws. Dumped when a
+  // title-logo draw appears, so a single frame's draw list can be read without
+  // knowing the frame in advance.
+  {
+    struct DrawRec {
+      size_t n;
+      uint8_t prim;
+      uint32_t tex0, tex1;
+      float u0, u1, v0, v1;
+    };
+    static DrawRec s_rec[80];
+    static int s_rec_n = 0;
+    static const bool s_alldraws = std::getenv("NWII_ALLDRAWS") != nullptr;
+    if (s_alldraws && !cmd.vertices.empty()) {
+      float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+      for (const auto &vv : cmd.vertices) {
+        if (!vv.has_tex[0]) continue;
+        umin = std::fmin(umin, vv.tex[0][0]);
+        umax = std::fmax(umax, vv.tex[0][0]);
+        vmin = std::fmin(vmin, vv.tex[0][1]);
+        vmax = std::fmax(vmax, vv.tex[0][1]);
+      }
+      s_rec[s_rec_n % 80] = {cmd.vertices.size(), cmd.prim_type,
+                             g_state.texStages[0].base_addr,
+                             g_state.texStages[1].base_addr, umin, umax, vmin,
+                             vmax};
+      ++s_rec_n;
+      static bool dumped = false;
+      if (!dumped && g_state.texStages[0].base_addr == 0x105A40E0u &&
+          g_state.bp[0xC0] == 0x08FA8F) {
+        dumped = true;
+        const int n = s_rec_n < 80 ? s_rec_n : 80;
+        std::fprintf(stderr, "[ALLDRAW] %d draws up to the logo:\n", n);
+        for (int k = 0; k < n; ++k) {
+          const DrawRec &d = s_rec[(s_rec_n - n + k) % 80];
+          std::fprintf(stderr,
+                       "  n=%zu prim=%02X tex0=%08X tex1=%08X u[%.3f %.3f] "
+                       "v[%.3f %.3f]\n",
+                       d.n, d.prim, d.tex0, d.tex1, d.u0, d.u1, d.v0, d.v1);
+        }
+        // Texture stage sizes and the image registers behind them.
+        for (int t = 0; t < 2; ++t) {
+          std::fprintf(stderr,
+                       "[ALLTEX] stage%d %08X %ux%u fmt=%u bp8%X=%06X "
+                       "bp9%X=%06X bpA%X=%06X\n",
+                       t, g_state.texStages[t].base_addr,
+                       g_state.texStages[t].width, g_state.texStages[t].height,
+                       (unsigned)g_state.texStages[t].format, t,
+                       g_state.bp[0x88 + t], t, g_state.bp[0x90 + t], t,
+                       g_state.bp[0x98 + t]);
+        }
+      }
+    }
+  }
+
+  // NWII_LETTERDBG: state of the letter-shaped draws that use 0x105F9640.
+  {
+    static const bool s_letter = std::getenv("NWII_LETTERDBG") != nullptr;
+    static int ln = 0;
+    if (s_letter && !cmd.vertices.empty() &&
+        g_state.texStages[0].base_addr == 0x105F9640u && ln++ < 6) {
+      std::fprintf(stderr,
+                   "[LETTER] n=%zu wh=%ux%u fmt=%u bp80=%06X bp81=%06X "
+                   "bp88=%06X bp89=%06X bp90=%06X bp91=%06X bp92=%06X "
+                   "bp93=%06X bp98=%06X bp99=%06X bpa8=%06X bpa9=%06X\n",
+                   cmd.vertices.size(), g_state.texStages[0].width,
+                   g_state.texStages[0].height,
+                   (unsigned)g_state.texStages[0].format, g_state.bp[0x80],
+                   g_state.bp[0x81], g_state.bp[0x88], g_state.bp[0x89],
+                   g_state.bp[0x90], g_state.bp[0x91], g_state.bp[0x92],
+                   g_state.bp[0x93], g_state.bp[0x98], g_state.bp[0x99],
+                   g_state.bp[0xA8], g_state.bp[0xA9]);
+    }
+  }
+
   // NWII_LOGOSUM: per-draw position/UV ranges of the title-logo draws.
   static const bool s_logosum = std::getenv("NWII_LOGOSUM") != nullptr;
   if (s_logosum && g_state.texStages[0].base_addr == 0x105A40E0u) {
@@ -816,6 +891,17 @@ static void SetupDrawState(const GXCommand &cmd) {
       }
       std::fprintf(stderr, "[LOGOUV] n=%zu v<0.35:%d 0.35-0.55:%d >0.55:%d\n",
                    cmd.vertices.size(), lowv, midv, highv);
+      // Per-letter meshes: each draw is a handful of quads. Print the UVs of
+      // consecutive vertices so distinct letter patches can be told apart from
+      // a repeated glyph.
+      if (s_logosum && cmd.vertices.size() <= 72) {
+        std::fprintf(stderr, "[LOGOLETTER] n=%zu uv:",
+                     cmd.vertices.size());
+        for (size_t k = 0; k < cmd.vertices.size() && k < 12; ++k)
+          std::fprintf(stderr, " (%.4f,%.4f)", cmd.vertices[k].tex[0][0],
+                       cmd.vertices[k].tex[0][1]);
+        std::fprintf(stderr, "\n");
+      }
       // Per-band position extents: a collapsed wordmark shows up as a band
       // whose vertices all sit in a tiny area.
       for (int band = 0; band < 3; ++band) {

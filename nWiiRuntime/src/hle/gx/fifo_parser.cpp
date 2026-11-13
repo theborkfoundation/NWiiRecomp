@@ -1030,11 +1030,16 @@ void FifoParser::DecodeDraw(GXCommand& c) {
             vtx.pre_xf = true;
         }
 
+        // NWII_NO_SNAPMTX: use the renderer's live position matrix instead of
+        // the parse-time snapshot (diagnostic for stale-snapshot transforms).
+        static const bool s_no_snap =
+            std::getenv("NWII_NO_SNAPMTX") != nullptr;
+
         // Transform by the per-draw matrix snapshot (GX 3x4). Doing it here,
         // with the matrix captured at this draw's stream position, fixes the
         // matrix-swap skinning scramble where a live render-time lookup would
         // use whatever matrix was written last.
-        if (!r.snap_pos_bank.empty() && vtx.has_pos) {
+        if (!s_no_snap && !r.snap_pos_bank.empty() && vtx.has_pos) {
             const uint32_t pb = (uint32_t)vtx.posMtxIdx * 4;
             const uint32_t nb = 3u * (vtx.posMtxIdx & 31);
             if (pb + 12 <= 256 && nb + 9 <= 96) {
@@ -1052,7 +1057,7 @@ void FifoParser::DecodeDraw(GXCommand& c) {
                 }
                 vtx.pre_xf = true;
             }
-        } else if (r.have_snap_mtx && vtx.has_pos) {
+        } else if (!s_no_snap && r.have_snap_mtx && vtx.has_pos) {
             const float* m = r.snap_pos_mtx;
             float x = vtx.pos[0], y = vtx.pos[1], z = vtx.pos[2];
             vtx.pos[0] = m[0]*x + m[1]*y + m[2]*z + m[3];
