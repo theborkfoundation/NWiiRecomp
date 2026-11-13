@@ -15,18 +15,96 @@ struct VNandFile {
 static std::vector<VNandFile> g_vnand_files;
 static bool g_vnand_init = false;
 
+// Build a spec-correct /shared2/sys/SYSCONF (Wiibrew: 4-byte "SCv0" magic,
+// BE item count, one BE offset per item plus a past-the-end offset, entries of
+// type/name/data, padded to 0x4000 and closed by "SCed"). The previous file
+// had a malformed header and a single bogus entry, so every settings lookup by
+// the game failed. Defaults follow Dolphin's InsertDefaultEntries, plus an
+// explicit stereo IPL.SND.
 static std::vector<uint8_t> make_sysconf() {
-    std::vector<uint8_t> sc(0x4000, 0xFF);
-    sc[0]='S'; sc[1]='C'; sc[2]='v'; sc[3]='1'; sc[4]='5';
-    sc[5] = 1;
-    sc[6] = 0; sc[7] = 1;
-    uint8_t key[] = "IPL.AR";
-    uint8_t val[] = { 0, 4, 'N','T','S','C' };
-    int off = 8;
-    sc[off++] = 0x02;
-    sc[off++] = (uint8_t)(sizeof(key)-1);
-    for (auto c : key) if(c) sc[off++] = c;
-    for (auto b : val) sc[off++] = b;
+    enum Type : uint8_t {
+        BigArray = 1, SmallArray = 2, Byte = 3, Short = 4,
+        Long = 5, LongLong = 6, ByteBool = 7
+    };
+    struct Item { uint8_t type; const char *name; std::vector<uint8_t> data; };
+    std::vector<Item> items;
+    auto add = [&](uint8_t type, const char *name, std::vector<uint8_t> data) {
+        items.push_back({type, name, std::move(data)});
+    };
+    auto bytes = [](std::initializer_list<uint8_t> b) {
+        return std::vector<uint8_t>(b);
+    };
+
+    add(BigArray, "BT.DINF", std::vector<uint8_t>(0x461, 0));
+    add(BigArray, "BT.CDIF", std::vector<uint8_t>(0x205, 0));
+    add(Long, "BT.SENS", bytes({0, 0, 0, 3}));
+    add(Byte, "BT.BAR", bytes({1}));
+    add(Byte, "BT.SPKV", bytes({0x58}));
+    add(Byte, "BT.MOT", bytes({1}));
+
+    std::vector<uint8_t> nick(22, 0);
+    for (int i = 0; i < 7; ++i) nick[(size_t)i * 2 + 1] = (uint8_t)"dolphin"[i];
+    nick[21] = 7;
+    add(SmallArray, "IPL.NIK", std::move(nick));
+    add(Byte, "IPL.LNG", bytes({1}));
+
+    std::vector<uint8_t> sadr(0x1008, 0);
+    sadr[0] = 0x6c;
+    add(BigArray, "IPL.SADR", std::move(sadr));
+
+    auto pc = std::vector<uint8_t>(0x4A, 0);
+    pc[1] = 0x04; pc[2] = 0x14;
+    add(SmallArray, "IPL.PC", std::move(pc));
+
+    add(Long, "IPL.CB", bytes({0, 0, 0, 0}));
+    add(Byte, "IPL.AR", bytes({0}));       // 4:3
+    add(Byte, "IPL.SSV", bytes({1}));
+    add(ByteBool, "IPL.CD", bytes({0}));
+    add(ByteBool, "IPL.CD2", bytes({0}));
+    add(ByteBool, "IPL.EULA", bytes({1}));
+    add(Byte, "IPL.UPT", bytes({2}));
+    add(Byte, "IPL.PGS", bytes({0}));
+    add(Byte, "IPL.E60", bytes({1}));
+    add(Byte, "IPL.DH", bytes({0}));
+    add(Long, "IPL.INC", bytes({0, 0, 0, 8}));
+    add(Long, "IPL.FRC", bytes({0, 0, 0, 0x28}));
+    add(SmallArray, "IPL.IDL", bytes({0, 1}));
+    add(Byte, "IPL.SND", bytes({1}));      // stereo
+
+    add(Long, "NET.WCFG", bytes({0, 0, 0, 1}));
+    add(Long, "NET.CTPC", bytes({0, 0, 0, 0}));
+    add(Byte, "WWW.RST", bytes({0}));
+    add(ByteBool, "MPLS.MOVIE", bytes({1}));
+
+    std::vector<uint8_t> sc;
+    auto put8 = [&](uint8_t v) { sc.push_back(v); };
+    auto put16 = [&](uint16_t v) { put8(v >> 8); put8(v & 0xFF); };
+
+    sc.insert(sc.end(), {'S', 'C', 'v', '0'});
+    put16((uint16_t)items.size());
+    const size_t entries_begin = sc.size() + 2 * (items.size() + 1);
+
+    std::vector<uint8_t> entries;
+    for (const auto &it : items) {
+        put16((uint16_t)(entries_begin + entries.size()));
+        const size_t name_len = std::strlen(it.name);
+        entries.push_back((uint8_t)((it.type << 5) | (name_len - 1)));
+        entries.insert(entries.end(), it.name, it.name + name_len);
+        if (it.type == BigArray || it.type == SmallArray) {
+            const size_t n = it.data.size();
+            if (it.type == BigArray) {
+                entries.push_back((uint8_t)((n - 1) >> 8));
+                entries.push_back((uint8_t)((n - 1) & 0xFF));
+            } else {
+                entries.push_back((uint8_t)(n - 1));
+            }
+        }
+        entries.insert(entries.end(), it.data.begin(), it.data.end());
+    }
+    put16((uint16_t)(entries_begin + entries.size()));
+    sc.insert(sc.end(), entries.begin(), entries.end());
+    sc.resize(0x4000, 0);
+    sc[0x3FFC] = 'S'; sc[0x3FFD] = 'C'; sc[0x3FFE] = 'e'; sc[0x3FFF] = 'd';
     return sc;
 }
 
