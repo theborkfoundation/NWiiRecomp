@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "runtime/gx_state.h"
+#include "runtime/movie_audio.h"
 #include "runtime/hw/hw.h"
 #include "runtime/diagnostics.h"
 
@@ -996,6 +997,7 @@ int main(int argc, char **argv) {
         if (SDL_GetQueuedAudioSize(audio_dev) < 1024 * 4 * 2) {
           static int16_t abuf[1024 * 2];
           nwii::runtime::hw::dsp_audio_pull(abuf, 1024);
+          nwii::runtime::movie_audio_mix(abuf, 1024);
           SDL_QueueAudio(audio_dev, abuf, 1024 * 4);
         }
       }

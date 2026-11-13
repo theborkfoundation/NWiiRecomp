@@ -49,6 +49,7 @@ add_library(nwiiruntime STATIC
     src/hle/texture_cache_gl.cpp
     src/hle/ax.cpp
     src/hle/ax_hle.cpp
+    src/hle/movie_audio.cpp
     src/hle/ios.cpp
     src/hle/ios_kernel.cpp
     src/hle/virtual_disc.cpp

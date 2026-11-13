@@ -1,4 +1,5 @@
 #include "runtime/virtual_disc.h"
+#include "runtime/movie_audio.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -152,6 +153,7 @@ size_t VirtualDisc::read(uint64_t offset, uint32_t len, uint8_t* dst) {
             continue;
         uint64_t lo = std::max(offset, r.offset);
         uint64_t hi = std::min(end, r.offset + r.size);
+        movie_audio_on_disc_read(r.host_path, lo - r.offset, r.size);
 
         FILE* f = nullptr;
         if (m_cached_path == r.host_path && m_cached_file != nullptr) {

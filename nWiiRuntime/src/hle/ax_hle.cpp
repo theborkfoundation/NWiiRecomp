@@ -115,8 +115,12 @@ void AXHle::copy_cmdlist(uint32_t addr, uint16_t size) {
     size = sizeof(cmd_) / 2;
   for (uint16_t i = 0; i < size; ++i)
     cmd_[i] = rd16(addr + (uint32_t)i * 2);
-  if (axdbg())
-    std::printf("[AX] cmdlist addr=%08X size=%u\n", addr, size);
+  if (axdbg()) {
+    std::printf("[AX] cmdlist addr=%08X size=%u:", addr, size);
+    for (uint16_t i = 0; i < size && i < 48; ++i)
+      std::printf(" %04X", cmd_[i]);
+    std::printf("\n");
+  }
 }
 
 void AXHle::run_cmds() {

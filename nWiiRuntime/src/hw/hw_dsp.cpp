@@ -278,11 +278,33 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             } else if (addr == 0xCC005036) {
                 bool was_on = (adma_control & 0x8000) != 0;
                 adma_control = val & 0xFFFF;
+                if (std::getenv("NWII_AIDBG"))
+                    std::cout << "[ADMA] control=" << std::hex << adma_control
+                              << " blocks=" << (adma_control & 0x7FFF)
+                              << " addr=" << adma_addr << std::dec << "\n";
                 if (!was_on && (adma_control & 0x8000)) {
                     if (s_adma_event_id != 0) {
                         EventScheduler::get().cancel(s_adma_event_id);
                     }
-                    s_adma_event_id = EventScheduler::get().schedule_recurring(g_ctx_ptr->tb_freq / 200, adma_event_cb);
+                    // ADMA transfers `blocks` 32-byte blocks per interrupt.
+                    // Each stereo s16 frame is 4 bytes, and AI runs at 32 kHz,
+                    // so the interrupt period is frames/32000 seconds. For the
+                    // game's 12 blocks (384 B = 96 frames) that is 3 ms
+                    // (333.3 Hz), matching the AX ucode's 96-sample frame.
+                    // A fixed 200 Hz made the guest audio clock run 1.67x slow
+                    // and starved every buffer.
+                    const uint64_t blocks = adma_control & 0x7FFF;
+                    const uint64_t frames = blocks * 8;
+                    uint64_t period = g_ctx_ptr->tb_freq * frames / 32000;
+                    if (const char *e = std::getenv("NWII_AI_HZ")) {
+                        const uint64_t hz = std::strtoul(e, nullptr, 10);
+                        if (hz)
+                            period = g_ctx_ptr->tb_freq / hz;
+                    }
+                    if (period == 0)
+                        period = 1;
+                    s_adma_event_id = EventScheduler::get().schedule_recurring(
+                        period, adma_event_cb);
                 } else if (was_on && !(adma_control & 0x8000)) {
                     if (s_adma_event_id != 0) {
                         EventScheduler::get().cancel(s_adma_event_id);
