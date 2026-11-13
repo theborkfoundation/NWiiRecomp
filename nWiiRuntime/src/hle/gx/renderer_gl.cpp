@@ -1164,6 +1164,47 @@ public:
           }
         }
         DrawPrimitive(cmd);
+        // NWII_LOGO_STEPS: dump the framebuffer after each title-logo draw so
+        // the contribution (and overdraw order) of every layer is visible.
+        static const bool s_steps =
+            std::getenv("NWII_LOGO_STEPS") != nullptr;
+        if (s_steps && g_state.texStages[0].base_addr == 0x105A40E0u &&
+            g_state.bp[0xC0] == 0x08FA8F) {
+          static int step = 0;
+          if (step < 12) {
+            FlushBatch();
+            s_batch_open = false;
+            glFinish();
+            char path[256];
+            std::snprintf(path, sizeof(path),
+                          "/Users/bachnx/Projects/wii-lie/NWiiRecomp/.dev/"
+                          "rayman/step_%02d_%zu.bmp",
+                          step++, cmd.vertices.size());
+            std::vector<unsigned char> px(640 * 480 * 4);
+            glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE,
+                         px.data());
+            if (FILE *f = std::fopen(path, "wb")) {
+              unsigned char hdr[54] = {0};
+              const uint32_t img = 640 * 480 * 4;
+              const uint32_t total = 54 + img, off = 54, ihs = 40;
+              const int32_t w = 640, h = 480;
+              const uint16_t planes = 1, bpp = 32;
+              hdr[0] = 'B'; hdr[1] = 'M';
+              std::memcpy(&hdr[2], &total, 4);
+              std::memcpy(&hdr[10], &off, 4);
+              std::memcpy(&hdr[14], &ihs, 4);
+              std::memcpy(&hdr[18], &w, 4);
+              std::memcpy(&hdr[22], &h, 4);
+              std::memcpy(&hdr[26], &planes, 2);
+              std::memcpy(&hdr[28], &bpp, 2);
+              std::memcpy(&hdr[34], &img, 4);
+              std::fwrite(hdr, 1, 54, f);
+              for (int y = 479; y >= 0; --y)
+                std::fwrite(&px[(size_t)y * 640 * 4], 1, 640 * 4, f);
+              std::fclose(f);
+            }
+          }
+        }
       }
     }
     if (s_batch_open) {
