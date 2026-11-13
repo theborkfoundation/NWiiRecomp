@@ -530,8 +530,15 @@ bool interpret_one(CPUContext& ctx) {
         case 72:  ctx.fpr[rD] = b; break;                              
         case 136: ctx.fpr[rD] = -std::fabs(b); break;                  
         case 264: ctx.fpr[rD] = std::fabs(b); break;                   
-        case 38: case 70: case 134: case 711: break; 
-        case 583: { uint64_t z = ctx.fpscr; std::memcpy(&ctx.fpr[rD], &z, 8); break; } 
+        case 38: ctx.set_fpscr_bit((insn >> 21) & 0x1F, true); break;  
+        case 70: ctx.set_fpscr_bit((insn >> 21) & 0x1F, false); break; 
+        case 134: ctx.mtfsfi((insn >> 23) & 0x7, (insn >> 12) & 0xF); break; 
+        case 711: { 
+            uint64_t v; std::memcpy(&v, &ctx.fpr[rB], 8);
+            ctx.mtfsf((insn >> 17) & 0xFF, (uint32_t)v); break;
+        }
+        case 64: ctx.mcrfs((insn >> 23) & 0x7, (insn >> 18) & 0x7); break; 
+        case 583: { uint64_t z = ctx.mffs_bits(); std::memcpy(&ctx.fpr[rD], &z, 8); break; } 
         default:
             std::cerr << "[Interp] Unhandled op63 xo=" << xo10 << " at 0x"
                       << std::hex << pc << std::dec << " (nop)\n";

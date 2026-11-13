@@ -43,6 +43,15 @@ int main(int argc, char** argv) {
     emit(0x80011210, {x(1014, 0, 4, 3), 0x4e800020});
     emit(0x80011220, {(4u << 26) | (3u << 11) | (1014u << 1), 0x4e800020});
     emit(0x80011230, {(4u << 26) | (4u << 16) | (3u << 11) | (1014u << 1), 0x4e800020});
+    // FPSCR moves: mffs, mtfsf 0xF0, mtfsb0 0, mtfsb1 0, mtfsfi 0,15,
+    // and mcrfs cr2,cr1. FPSCR bit numbers are MSB-first, so bit 0 is FX.
+    auto f = [](unsigned word) { return (63u << 26) | word; };
+    emit(0x80011300, {f((3u << 21) | (583u << 1)), 0x4e800020});
+    emit(0x80011310, {f((0xF0u << 17) | (4u << 11) | (711u << 1)), 0x4e800020});
+    emit(0x80011320, {f((70u << 1)), 0x4e800020});
+    emit(0x80011330, {f((38u << 1)), 0x4e800020});
+    emit(0x80011340, {f((15u << 12) | (134u << 1)), 0x4e800020});
+    emit(0x80011350, {f((2u << 23) | (1u << 18) | (64u << 1)), 0x4e800020});
     // Carry consumers make these tests fail if the producer leaves stale CA.
     emit(0x80011000, {d(8, 5, 3, -1), x(202, 6, 4, 0), 0x4e800020});
     emit(0x80011010, {d(8, 3, 3, 0), x(202, 5, 4, 0), 0x4e800020});

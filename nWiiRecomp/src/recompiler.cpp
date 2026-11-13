@@ -1672,9 +1672,12 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "        std::memcpy(&ctx.fpr[" << fD << "], &val, 8);\n";
       out << "    } // fctiw\n";
     } else if (xo == 583) { 
-      out << "    ctx.fpr[" << fD << "] = 0.0; // mffs stub\n";
+      out << "    { uint64_t v = ctx.mffs_bits(); std::memcpy(&ctx.fpr["
+          << fD << "], &v, 8); } // mffs\n";
     } else if (xo == 711) { 
-      out << "    // mtfsf stub (ignore FPSCR write)\n";
+      uint32_t fm = (ppc_inst.value() >> 17) & 0xFF;
+      out << "    { uint64_t v; std::memcpy(&v, &ctx.fpr[" << fB
+          << "], 8); ctx.mtfsf(" << fm << ", (uint32_t)v); } // mtfsf\n";
     } else if ((xo & 0x1F) == 26) { 
       out << "    ctx.fpr[" << fD << "] = 1.0 / std::sqrt(ctx.fpr[" << fB
           << "]); // frsqrte\n";
@@ -1715,9 +1718,18 @@ void Recompiler::emit_instruction(std::ostream &out,
           << "] : ctx.fpr[" << fB << "]; // fsel\n";
     } else if (xo == 38 ||
                xo == 70) { 
-      out << "    // mtfsb1/mtfsb0 stub (FPSCR ignored)\n";
+      uint32_t bit = (ppc_inst.value() >> 21) & 0x1F;
+      out << "    ctx.set_fpscr_bit(" << bit << ", "
+          << (xo == 38 ? "true" : "false") << "); // mtfsb"
+          << (xo == 38 ? "1" : "0") << "\n";
     } else if (xo == 64) { 
-      out << "    // mcrfs stub\n";
+      uint32_t crfd = (ppc_inst.value() >> 23) & 0x7;
+      uint32_t crfs = (ppc_inst.value() >> 18) & 0x7;
+      out << "    ctx.mcrfs(" << crfd << ", " << crfs << "); // mcrfs\n";
+    } else if (xo == 134) { 
+      uint32_t field = (ppc_inst.value() >> 23) & 0x7;
+      uint32_t imm = (ppc_inst.value() >> 12) & 0xF;
+      out << "    ctx.mtfsfi(" << field << ", " << imm << "); // mtfsfi\n";
     } else if (xo == 0 || xo == 32) { 
       uint32_t crfD = fD >> 2;
       out << "    {\n";

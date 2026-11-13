@@ -1,6 +1,8 @@
 #include "runtime/cpu_context.h"
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 
 using namespace nwii::runtime;
@@ -13,7 +15,10 @@ void interpret_step(CPUContext&) { std::abort(); }
 }
 #include "indexed_memory.inc"
 
-static void require(bool ok) { if (!ok) std::abort(); }
+static void require_impl(bool ok, int line) {
+    if (!ok) { std::fprintf(stderr, "require failed at line %d\n", line); std::abort(); }
+}
+#define require(cond) require_impl((cond), __LINE__)
 int main() {
     auto ctx = std::make_unique<CPUContext>();
     // Exercise both worker orderings. A completion before handle publication
@@ -131,6 +136,36 @@ int main() {
             for (unsigned k = 0; k < 96; ++k)
                 require(c.mmu.read8(addr + k) == (k >= 32 && k < 64 ? 0 : 0xa5));
         }
+    }
+    {
+        auto& c = *ctx;
+        uint64_t bits;
+        // mffs: FPSCR in the low word, Dolphin's NaN prefix in the high word.
+        c.fpscr = 0x12345678u; c.fpr[3] = 0.0;
+        run(func_80011300, 0x80011300);
+        std::memcpy(&bits, &c.fpr[3], 8);
+        require(bits == 0xFFF8000012345678ull);
+        // mtfsf 0xF0 replaces the top four FPSCR nibbles only.
+        c.fpscr = 0x11223344u;
+        bits = 0xAABBCCDDull;
+        std::memcpy(&c.fpr[4], &bits, 8);
+        run(func_80011310, 0x80011310);
+        require(c.fpscr == 0xAABB3344u);
+        // mtfsb1/mtfsb0 set and clear one bit.
+        c.fpscr = 0;
+        run(func_80011330, 0x80011330);
+        require(c.fpscr == 0x80000000u);
+        run(func_80011320, 0x80011320);
+        require(c.fpscr == 0);
+        // mtfsfi 0,15 writes the top nibble.
+        c.fpscr = 0x12345678u;
+        run(func_80011340, 0x80011340);
+        require(c.fpscr == 0xF2345678u);
+        // mcrfs cr2,cr1 copies field 1 and clears the exception bits read.
+        c.fpscr = 0x0F000000u;
+        run(func_80011350, 0x80011350);
+        require(c.fpscr == 0);
+        require(c.cr[2].lt && c.cr[2].gt && c.cr[2].eq && c.cr[2].so);
     }
     for (unsigned input : {0u, 1u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
         ctx->gpr[3] = input; ctx->gpr[4] = 0; ctx->xer = 0x80000000u;

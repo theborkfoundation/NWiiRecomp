@@ -599,6 +599,46 @@ struct CPUContext {
       mmu.write32(addr + i, 0);
   }
 
+  // mffs copies FPSCR into the low 32 bits of the destination FPR. Hardware
+  // leaves the high 32 bits undefined; use Dolphin's signalling-NaN prefix so
+  // the value survives stfd/lfd round trips bit-exactly.
+  uint64_t mffs_bits() const { return 0xFFF8000000000000ull | fpscr; }
+
+  // mtfsf writes the FPSCR nibbles selected by the 8-bit field mask.
+  void mtfsf(uint32_t fm, uint32_t value) {
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < 8; ++i)
+      if (fm & (1u << i)) mask |= 0xFu << (i * 4);
+    fpscr = (fpscr & ~mask) | (value & mask);
+  }
+
+  // mtfsfi writes one 4-bit FPSCR field from an instruction immediate.
+  void mtfsfi(uint32_t field, uint32_t imm) {
+    field &= 7;
+    uint32_t mask = 0xF0000000u >> (4 * field);
+    fpscr = (fpscr & ~mask) | ((imm & 0xFu) << (28 - 4 * field));
+  }
+
+  // mtfsb0 (set=false) / mtfsb1 (set=true) change a single FPSCR bit.
+  void set_fpscr_bit(uint32_t bit, bool set) {
+    uint32_t mask = 0x80000000u >> (bit & 31);
+    if (set) fpscr |= mask;
+    else fpscr &= ~mask;
+  }
+
+  // mcrfs copies one FPSCR field into a CR field and clears the exception
+  // bits that were read (FPSCR.FX and the exception bits in that field).
+  void mcrfs(uint32_t crfd, uint32_t crfs) {
+    const uint32_t shift = 4 * (7 - (crfs & 7));
+    const uint32_t value = (fpscr >> shift) & 0xF;
+    fpscr &= ~((0xFu << shift) & 0xBFF80000u); // FX | all exception bits
+    auto &f = cr[crfd & 7];
+    f.lt = (value & 8) != 0;
+    f.gt = (value & 4) != 0;
+    f.eq = (value & 2) != 0;
+    f.so = (value & 1) != 0;
+  }
+
   void queue_callback(uint32_t cb, uint32_t arg1, uint32_t arg2, bool is_irq = false) {
     std::lock_guard<std::mutex> lock(cb_mutex);
     pending_callbacks.push({cb, arg1, arg2, is_irq});
