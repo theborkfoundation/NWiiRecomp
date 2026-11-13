@@ -1,5 +1,6 @@
 #include "runtime/hw/hw.h"
 #include "runtime/config.h"
+#include "runtime/ax_hle.h"
 #include "runtime/cpu_context.h"
 #include <iostream>
 #include <cstring>
@@ -188,7 +189,6 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                 
                 
                 static uint16_t s_cpu_mail_hi = 0;
-                static int s_ax_state = 0; 
                 bool completed = (addr == 0xCC005002);
                 if (addr == 0xCC005000)
                     s_cpu_mail_hi = val & 0xFFFF;
@@ -196,30 +196,31 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                 dsp_mbox_cpu_hi &= ~0x8000;
                 if (completed && (dsp_control & 0x0100)) {
                     uint32_t mail = ((uint32_t)s_cpu_mail_hi << 16) | (val & 0xFFFF);
-                    auto reply = [](uint16_t lo) {
+                    // AXWii mails are handled by the HLE; anything it does
+                    // not consume (boot-ucode mails) keeps the old generic ack.
+                    static const bool sink_ready = []() {
+                        AXHle::get().set_mail_sink([](uint16_t lo) {
+                            // Deliver slightly later, like the ucode interrupt:
+                            // replying inside the CPU's mailbox write is re-entrant.
+                            EventScheduler::get().schedule_after(
+                                g_ctx_ptr->tb_freq / 1000, [lo](CPUContext&, uint64_t) {
+                                    dsp_mbox_dsp_hi = 0xDCD1;
+                                    dsp_mbox_dsp_lo = lo;
+                                    dsp_control |= 0x0080;
+                                    dsp_update_pi();
+                                });
+                        });
+                        return true;
+                    }();
+                    (void)sink_ready;
+                    if (!AXHle::get().handle_mail(mail)) {
                         EventScheduler::get().schedule_after(
-                            g_ctx_ptr->tb_freq / 1000, [lo](CPUContext&, uint64_t) {
+                            g_ctx_ptr->tb_freq / 1000, [](CPUContext&, uint64_t) {
                                 dsp_mbox_dsp_hi = 0xDCD1;
-                                dsp_mbox_dsp_lo = lo;
+                                dsp_mbox_dsp_lo = 0x0000;
                                 dsp_control |= 0x0080;
                                 dsp_update_pi();
                             });
-                    };
-                    if (s_ax_state == 1) {
-                        
-                        reply(0x0002); 
-                        s_ax_state = 2;
-                    } else if ((mail & 0xFFFF0000u) == 0xBABE0000u) {
-                        s_ax_state = 1;
-                    } else if (mail == 0xCDD10001u) {
-                        reply(0x0001); 
-                        s_ax_state = 0;
-                    } else if ((mail & 0xFFFF0000u) == 0xCDD10000u) {
-                        s_ax_state = 0; 
-                        reply(0x0000);
-                    } else {
-
-                        reply(0x0000);
                     }
                 }
                 if (([](){ static const bool s = (std::getenv("NWII_DSPTRACE") != nullptr); return s; })())

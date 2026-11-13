@@ -48,6 +48,7 @@ add_library(nwiiruntime STATIC
     src/hle/gx/tev_shader_gen.cpp
     src/hle/texture_cache_gl.cpp
     src/hle/ax.cpp
+    src/hle/ax_hle.cpp
     src/hle/ios.cpp
     src/hle/ios_kernel.cpp
     src/hle/virtual_disc.cpp
