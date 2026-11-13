@@ -468,6 +468,22 @@ static inline void wgp_push(uint8_t b) {
 
     g_hw_fifo.push_back(b);
     ++g_wgp_total_bytes;
+
+    // Raw draw-sync fallback. The parser can lose command boundaries on a
+    // damaged stream, which made GFXAdapter_WII::syncGPU() spin forever on
+    // GXSetDrawSync(0xCAFE). Watch the live FIFO bytes directly: a 0x47
+    // command is followed by a 24-bit token (the engine writes 0x4700CAFE).
+    // Signalling an extra token is harmless; a lost one deadlocks the game.
+    {
+        static uint8_t win[4] = {0, 0, 0, 0};
+        win[0] = win[1];
+        win[1] = win[2];
+        win[2] = win[3];
+        win[3] = b;
+        if (win[0] == 0x47)
+            nwii::runtime::hw::pe_signal_token(
+                (uint16_t)((win[2] << 8) | win[3]), true);
+    }
 }
 
 

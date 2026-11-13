@@ -1190,8 +1190,10 @@ static size_t CommandSizeAt(const std::vector<uint8_t>& f, size_t off) {
         return (off + 5 <= n) ? 5 : 0;
     case 0x40:
         return (off + 9 <= n) ? 9 : 0;
+    case 0x47:
+        return (off + 4 <= n) ? 4 : 0;
     case 0x48:
-        return 1;
+        return (off + 3 <= n) ? 3 : 0;
     case 0x78: {
         // Seam read-modify-write marker: kind, reg, mask, value.
         if (off + 11 > n) return 0;
@@ -1274,7 +1276,7 @@ static size_t ResyncToFrameEdge(const std::vector<uint8_t>& f, size_t from) {
 static bool NextLooksLikeCommand(const std::vector<uint8_t>& f, size_t p) {
     if (p >= f.size()) return true; // end of buffer: nothing to contradict us
     uint8_t c = f[p];
-    if (c == 0x00 || c == 0x44 || c == 0x48) return true; // NOP-ish opcodes
+    if (c == 0x00 || c == 0x44) return true; // NOP-ish opcodes
     return CommandSizeAt(f, p) != 0;
 }
 
@@ -1317,7 +1319,7 @@ static size_t RepairVertexSize(const std::vector<uint8_t>& f, size_t offset,
 // engine pads its batch with NOPs first, so zeros have to be skipped before the
 // check. Float payload cannot fake two consecutive BP/XF writes.
 static bool StateBurstAt(const std::vector<uint8_t> &f, size_t q) {
-    while (q < f.size() && (f[q] == 0x00 || f[q] == 0x44 || f[q] == 0x48)) ++q;
+    while (q < f.size() && (f[q] == 0x00 || f[q] == 0x44)) ++q;
     if (q + 1 >= f.size() || !IsStateOpcode(f[q])) return false;
     size_t s1 = CommandSizeAt(f, q);
     if (!s1 || q + s1 >= f.size() || !IsStateOpcode(f[q + s1])) return false;
@@ -1648,9 +1650,23 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             }
             commands.push_back(std::move(c));
             offset += 11;
+        } else if (cmd == 0x47) {
+            // 4-byte draw sync: 0x47 + 24-bit token. The engine writes
+            // 0x4700CAFE for syncGPU(); the GP echoes the low 16 bits back
+            // into __GXData->drawSync and raises the token interrupt.
+            if (offset + 4 > fifo_size) break;
+            uint16_t token = (uint16_t)((fifo[offset + 2] << 8) | fifo[offset + 3]);
+            nwii::runtime::hw::pe_signal_token(token, true);
+            offset += 4;
         } else if (cmd == 0x48) {
-            
-            offset++;
+            // Draw-sync: opcode + u16 token. The GP copies the token back into
+            // __GXData->drawSync and raises the token interrupt; GXReadDrawSync
+            // polls that field. Ignoring the payload made GXSetDrawSync(0xCAFE)
+            // (GFXAdapter_WII::syncGPU) spin forever after world load.
+            if (offset + 3 > fifo_size) break;
+            uint16_t token = (uint16_t)((fifo[offset + 1] << 8) | fifo[offset + 2]);
+            nwii::runtime::hw::pe_signal_token(token, true);
+            offset += 3;
         } else if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) {
             if (depth > 0) g_prof_dl_loadindx++;
             if (offset + 5 > fifo_size) break;
