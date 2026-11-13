@@ -954,6 +954,41 @@ void FifoParser::DecodeDraw(GXCommand& c) {
         // NWII_IDXDBG: raw index bytes of the small per-letter meshes next to
         // the values they decode to.
         static const bool s_idxdbg = std::getenv("NWII_IDXDBG") != nullptr;
+        if (s_idxdbg && i == 0 && r.count == 72) {
+            for (int slot = 0; slot < 4; ++slot) {
+                const float *m = &g_parse_posmtx[slot * 4];
+                std::printf("[LETTERSLOT] defIdx=%u slot%d = %.4f %.4f %.4f "
+                            "%.4f | %.4f %.4f %.4f %.4f\n",
+                            (unsigned)r.defPosMtxIdx, slot, m[0], m[1], m[2],
+                            m[3], m[4], m[5], m[6], m[7]);
+            }
+        }
+        if (s_idxdbg && i < 4 && r.count == 72 && buf_size > 0 && buf.size() > vstart + 1) {
+            auto bef = [](const uint8_t *q) -> float {
+                uint32_t w = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) |
+                             ((uint32_t)q[2] << 8) | q[3];
+                float f;
+                std::memcpy(&f, &w, 4);
+                return f;
+            };
+            const uint32_t i0 = buf[vstart];
+            const uint32_t i1 = buf[vstart + 1];
+            const uint8_t *e0 = nwii::runtime::g_mmu
+                                    ? nwii::runtime::g_mmu->get_ptr(
+                                          r.arrayBase[0] + i0 * r.arrayStride[0])
+                                    : nullptr;
+            const uint8_t *e1 = nwii::runtime::g_mmu
+                                    ? nwii::runtime::g_mmu->get_ptr(
+                                          r.arrayBase[0] + i1 * r.arrayStride[0])
+                                    : nullptr;
+            if (e0 && e1) {
+                std::printf("[SWAPDBG] i=%u idx0=%u entry=(%.4f %.4f %.4f "
+                            "%.4f) idx1=%u entry=(%.4f %.4f %.4f %.4f)\n",
+                            i, i0, bef(e0), bef(e0 + 4), bef(e0 + 8),
+                            bef(e0 + 12), i1, bef(e1), bef(e1 + 4), bef(e1 + 8),
+                            bef(e1 + 12));
+            }
+        }
         if (s_idxdbg && i == 0 && r.count == 288) {
             std::printf("[LETTERMTX] defPosMtxIdx=%u arr0 base=%08X stride=%u "
                         "arr4 base=%08X stride=%u stream=%zu\n",
