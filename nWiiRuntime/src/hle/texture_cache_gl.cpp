@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
 #include <vector>
 
 // GX texture decoding, kept bit-exact with Dolphin's TextureDecoder:
@@ -154,31 +155,25 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     }
     uint32_t size = texture_data_size(stage.width, stage.height, stage.format);
     uint32_t stride = size > 32 * 4096 ? size / 4096 : 32;
-    uint32_t hash = 2166136261u;
 
-    
-    
-    if (const uint8_t* p = ctx.mmu.get_ptr(stage.base_addr)) {
-        for (uint32_t off = 0; off + 4 <= size; off += stride) {
-            uint32_t w;
-            std::memcpy(&w, p + off, 4);
-            hash = (hash ^ w) * 16777619u;
+    // Hash exactly like the texel data (Dolphin XORs a TLUT hash into its
+    // texture hash as well).
+    auto hash_texture = [&]() {
+        uint32_t hash = 2166136261u;
+        if (const uint8_t* p = ctx.mmu.get_ptr(stage.base_addr)) {
+            for (uint32_t off = 0; off + 4 <= size; off += stride) {
+                uint32_t w;
+                std::memcpy(&w, p + off, 4);
+                hash = (hash ^ w) * 16777619u;
+            }
         }
-    }
-
-    // hash exactly like the texel data (Dolphin XORs a TLUT hash into its
-
-    
-    
-    uint32_t palette_entries = 0;
-    if (stage.format == 8)        
-        palette_entries = 16;
-    else if (stage.format == 9)   
-        palette_entries = 256;
-    else if (stage.format == 10)  
-        palette_entries = 16384;
-
-    {
+        uint32_t palette_entries = 0;
+        if (stage.format == 8)
+            palette_entries = 16;
+        else if (stage.format == 9)
+            palette_entries = 256;
+        else if (stage.format == 10)
+            palette_entries = 16384;
         uint32_t tl_bytes = palette_entries * 2;
         uint32_t tl_off = stage.tlut_offset;
         if (tl_off < sizeof(gx::g_state.tlutMem)) {
@@ -194,7 +189,10 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
             for (; i < tl_bytes; ++i)
                 hash = (hash ^ tp[i]) * 16777619u;
         }
-    }
+        return hash;
+    };
+
+    uint32_t hash = hash_texture();
 
     TextureKey key = {stage.base_addr, stage.width, stage.height,
                       stage.format, stage.tlut_offset, stage.tlut_format, hash};
@@ -206,7 +204,59 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     if (cache.size() > 512)
         clear();
 
-    Image img = decode_texture(ctx, stage);
+    // NWII_TEXSTABLE=1: the guest movie decoder may write the I8 planes from
+    // another thread while this one reads them. Decode twice and accept only
+    // when two consecutive decodes of the source are identical, so a frame
+    // that is mid-update is never sampled. Limited to movie plane sizes.
+    static const bool s_texstable = []() {
+        const char *e = std::getenv("NWII_TEXSTABLE");
+        return !(e && e[0] == '0'); // on by default; NWII_TEXSTABLE=0 disables
+    }();
+    static const bool s_moviedbg =
+        std::getenv("NWII_MOVIEDBG") != nullptr;
+    const bool movie_plane =
+        stage.format == 1 /* I8 */ &&
+        ((stage.width == 640 && stage.height == 456) ||
+         (stage.width == 320 && stage.height == 232));
+    // Decoding the plane texel-by-texel through the MMU is slow enough that a
+    // decoder thread can overwrite it mid-read. For the linear I8 planes the
+    // decode is just a byte copy, so snapshot the bytes twice with memcpy and
+    // accept only when both copies match; retries are cheap.
+    Image img;
+    bool decoded = false;
+    if (s_texstable && movie_plane &&
+        Config::get().game_profile.linear_i8) {
+        const size_t count = (size_t)stage.width * stage.height;
+        const uint8_t *src = ctx.mmu.get_ptr(stage.base_addr);
+        if (src) {
+            std::vector<uint8_t> snap(count), check(count);
+            int attempt = 0;
+            bool stable = false;
+            for (; attempt < 4; ++attempt) {
+                std::memcpy(snap.data(), src, count);
+                std::memcpy(check.data(), src, count);
+                stable = std::memcmp(snap.data(), check.data(), count) == 0;
+                if (stable)
+                    break;
+            }
+            if (s_moviedbg) {
+                static const auto t0 = std::chrono::steady_clock::now();
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count();
+                std::printf("[MOVIETEX] t=%lld base=%08X %ux%u attempt=%d stable=%d\n",
+                            (long long)ms, stage.base_addr, stage.width,
+                            stage.height, attempt, stable ? 1 : 0);
+            }
+            img = GenImageColor(stage.width, stage.height, BLANK);
+            Color *px = (Color *)img.data;
+            for (size_t i = 0; i < count; ++i)
+                px[i] = {snap[i], snap[i], snap[i], snap[i]};
+            decoded = true;
+        }
+    }
+    if (!decoded)
+        img = decode_texture(ctx, stage);
     if (texdump_enabled()) {
         summarize("dec", stage, 0, (const Color *)img.data, stage.width, stage.height);
         int idx = next_dump_index();

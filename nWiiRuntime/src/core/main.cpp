@@ -6,6 +6,7 @@
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
 #include "runtime/virtual_disc.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -258,7 +259,22 @@ int main(int argc, char **argv) {
       // NWII_NO_VSYNC=1 keeps SDL_GL_SwapWindow from blocking on the display
       // link; without an active display (locked screen, headless CI) the wait
       // never completes and the whole guest stalls on vblank.
-      SDL_GL_SetSwapInterval(std::getenv("NWII_NO_VSYNC") ? 0 : 1);
+      // Never present a visible window unsynchronised. NWII_NO_VSYNC exists to
+      // stop the swap stalling when there is no real display link (hidden or
+      // headless capture runs); for a window the user can see, tearing is a
+      // bug, not a diagnostic.
+      const bool no_vsync_env = std::getenv("NWII_NO_VSYNC") != nullptr;
+      const bool allow_no_vsync = hidden_window || headless;
+      const int want_interval = (no_vsync_env && allow_no_vsync) ? 0 : 1;
+      const int swap_rc = SDL_GL_SetSwapInterval(want_interval);
+      std::cout << "[Video] swap interval request=" << want_interval
+                << " rc=" << swap_rc
+                << " actual=" << SDL_GL_GetSwapInterval()
+                << " (NO_VSYNC=" << (no_vsync_env ? 1 : 0) << ")" << std::endl;
+      if (no_vsync_env && !allow_no_vsync) {
+        std::cout << "[Video] NWII_NO_VSYNC ignored for a visible window; run "
+                     "with NWII_HIDDEN_WINDOW=1 for capture runs.\n";
+      }
     }
     
     glGenFramebuffers(1, &efb_fbo);
@@ -906,7 +922,17 @@ int main(int argc, char **argv) {
             }
             return 300;
           }();
-          if ((++shot_frame % shot_every) == 0) {
+          static const int shot_from = []() {
+            const char *e = std::getenv("NWII_SHOT_FROM");
+            return e ? std::atoi(e) : 0;
+          }();
+          static const int shot_to = []() {
+            const char *e = std::getenv("NWII_SHOT_TO");
+            return e ? std::atoi(e) : 0x7fffffff;
+          }();
+          ++shot_frame;
+          if (shot_frame >= shot_from && shot_frame <= shot_to &&
+              (shot_frame % shot_every) == 0) {
             std::vector<unsigned char> px(640 * 480 * 4);
             if (xfb_present) {
               // Capture what is actually on screen: the presented XFB quad.
@@ -938,11 +964,32 @@ int main(int argc, char **argv) {
         extern uint64_t g_stat_draws;
         if (g_stat_draws > 0 && !s_vsync_enabled &&
             !std::getenv("NWII_NO_VSYNC")) {
-          SDL_GL_SetSwapInterval(1);
+          const int rc = SDL_GL_SetSwapInterval(1);
           s_vsync_enabled = true;
-          std::cout << "[Video] Initial loading complete. Switched to 60 FPS VSync." << std::endl;
+          std::cout << "[Video] Initial loading complete. VSync rc=" << rc
+                    << " actual=" << SDL_GL_GetSwapInterval() << std::endl;
         }
+        // NWII_VSYNCDBG: report how long the swap actually blocks. A working
+        // display-link-synced swap waits ~1 field (~16.7 ms at 60 Hz).
+        static const bool s_swapdbg =
+            std::getenv("NWII_VSYNCDBG") != nullptr;
+        const auto swap_start = std::chrono::steady_clock::now();
         SDL_GL_SwapWindow(window);
+        if (s_swapdbg) {
+          static int n = 0;
+          static double sum = 0.0, worst = 0.0;
+          const double ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - swap_start).count();
+          sum += ms;
+          worst = std::max(worst, ms);
+          if (++n % 300 == 0) {
+            std::cout << "[Video] swap avg=" << (sum / 300.0)
+                      << "ms max=" << worst << "ms" << std::endl;
+            sum = 0.0;
+            worst = 0.0;
+          }
+        }
       }
 
       if (audio_dev > 0) {
