@@ -944,6 +944,11 @@ void FifoParser::DecodeDraw(GXCommand& c) {
         // the values they decode to.
         static const bool s_idxdbg = std::getenv("NWII_IDXDBG") != nullptr;
         if (s_idxdbg && i == 0 && r.count == 288) {
+            std::printf("[LETTERMTX] defPosMtxIdx=%u arr0 base=%08X stride=%u "
+                        "arr4 base=%08X stride=%u stream=%zu\n",
+                        (unsigned)r.defPosMtxIdx, r.arrayBase[0],
+                        (unsigned)r.arrayStride[0], r.arrayBase[4],
+                        (unsigned)r.arrayStride[4], buf.size());
             std::printf("[LETTERMTX] snap=%.3f %.3f %.3f %.3f | %.3f %.3f "
                         "%.3f %.3f  have=%d bank=%zu\n",
                         r.snap_pos_mtx[0], r.snap_pos_mtx[1], r.snap_pos_mtx[2],
