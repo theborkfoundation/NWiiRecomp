@@ -540,21 +540,20 @@ struct CPUContext {
   
 
   
-  // Instruction count is a virtual clock: the guest gets a fixed number of
-  // instructions per emulated frame and never falls behind. Real elapsed time
-  // (NWII_WALLTB=1) is the hardware-accurate source, but while we run slower
-  // than real time it starves the game — measured on MP7: same input script,
-  // 122 DVD reads with the virtual clock vs 52 with the wall clock. Switch the
-  // default once the drain is fast enough to keep up.
+  // The timebase must advance at tb_freq (60.75 MHz) relative to wall time.
+  // Using inst_count made it advance at emulator instruction throughput, which
+  // is several times 60.75M/s here: guest timers ran ~3x fast, so the 15s boot
+  // movie played in under 5s. Wall clock is the default now; NWII_INSTTB=1
+  // restores the old virtual clock for experiments.
   uint64_t read_timebase() const {
-    static const bool wall = std::getenv("NWII_WALLTB") != nullptr;
-    if (wall) {
-      uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - tb_start)
-                        .count();
-      return us / 1000000 * tb_freq + us % 1000000 * tb_freq / 1000000;
-    }
-    return inst_count;
+    static const bool inst =
+        std::getenv("NWII_INSTTB") != nullptr;
+    if (inst)
+      return inst_count;
+    uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - tb_start)
+                      .count();
+    return us / 1000000 * tb_freq + us % 1000000 * tb_freq / 1000000;
   }
 
   
