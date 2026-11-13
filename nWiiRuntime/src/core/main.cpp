@@ -23,6 +23,7 @@
 
 namespace nwii::runtime {
     namespace hw { extern uint32_t g_vi_top_field_base; }
+    namespace hw { extern uint64_t g_vi_trigger_count; }
 }
 
 namespace nwii::runtime {
@@ -797,6 +798,7 @@ int main(int argc, char **argv) {
               ++nonblack;
           std::cout << "[STAT] " << ++stat_n * 5 << "s frames=" << std::dec
                     << g_stat_frames << " draws=" << g_stat_draws
+                    << " vi=" << nwii::runtime::hw::g_vi_trigger_count
                     << " parse_ms=" << g_stat_parse_us / 1000
                     << " render_ms=" << g_stat_render_us / 1000
                     << " efb_nonblack=" << nonblack << "/307200"

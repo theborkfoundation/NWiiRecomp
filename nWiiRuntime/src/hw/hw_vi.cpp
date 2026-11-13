@@ -1,4 +1,5 @@
 #include "runtime/hw/hw.h"
+#include <chrono>
 #include <cstdlib>
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
@@ -12,6 +13,7 @@ static uint32_t vi_dcr = 0;
 
 uint32_t g_vi_top_field_base = 0;
 uint32_t g_vi_btm_field_base = 0;
+uint64_t g_vi_trigger_count = 0;
 
 // bit15 of HI), bit28 = enable. Layout per Dolphin VideoInterface.h:
 static uint32_t vi_di[4] = {0, 0, 0, 0};
@@ -28,6 +30,19 @@ static void vi_update_interrupt() {
 }
 
 void vi_trigger_interrupt() {
+    // The VI fires once per field (~59.94 Hz). Several HLE paths can request a
+    // retrace (VIWaitForRetrace, vblank callbacks, DSP mailboxes); without a
+    // gate the guest sees 1.5-2x more retraces than frames are presented, so
+    // every frame-based timer in the game runs fast. Coalesce to one per field.
+    static const bool s_nogate =
+        std::getenv("NWII_NO_VI_GATE") != nullptr;
+    if (!s_nogate) {
+        static auto next = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next) return;
+        next = now + std::chrono::microseconds(16683);
+    }
+    ++g_vi_trigger_count;
     static const bool s_vitrace = (std::getenv("NWII_VITRACE") != nullptr);
     if (s_vitrace) {
         static int n = 0;
