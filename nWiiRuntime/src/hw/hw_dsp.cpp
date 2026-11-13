@@ -89,6 +89,20 @@ size_t dsp_audio_pull(int16_t* out, size_t frames) {
     adma_ring.erase(adma_ring.begin(), adma_ring.begin() + n * 2);
     if (n < frames)
         std::memset(out + n * 2, 0, (frames - n) * 2 * sizeof(int16_t));
+    static const bool s_audiodbg = std::getenv("NWII_AXTONE") != nullptr;
+    if (s_audiodbg) {
+        static int32_t peak = 0;
+        static uint64_t total = 0;
+        for (size_t i = 0; i < n * 2; ++i)
+            peak = std::max(peak, std::abs((int)out[i]));
+        total += n;
+        if (total >= 32000) {
+            std::cout << "[Audio] pulled " << total << " frames, peak=" << peak
+                      << std::endl;
+            total = 0;
+            peak = 0;
+        }
+    }
     return n;
 }
 

@@ -11,6 +11,7 @@
 #include "runtime/cpu_context.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -364,11 +365,24 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
       wr32(surround_addr + (uint32_t)i * 4, (uint32_t)main_s_[i]);
   }
 
+  // NWII_AXTONE=1: mix a 440 Hz test tone into the output so the
+  // AX -> AI/ADMA -> SDL path can be verified without any guest voices.
+  static const bool tone_on = std::getenv("NWII_AXTONE") != nullptr;
+  static double tone_phase = 0.0;
+  const double tone_step = 2.0 * 3.141592653589793 * 440.0 / 19200.0;
+
   for (int i = 0; i < 96; ++i) {
     ramp += step;
     const int32_t v = (int32_t)ramp;
-    const int16_t l = clamp16((int32_t)(((int64_t)main_l_[i] * v) >> 15));
-    const int16_t r = clamp16((int32_t)(((int64_t)main_r_[i] * v) >> 15));
+    int32_t t = 0;
+    if (tone_on) {
+      t = (int32_t)(std::sin(tone_phase) * 6000.0);
+      tone_phase += tone_step;
+      if (tone_phase > 6.283185307179586)
+        tone_phase -= 6.283185307179586;
+    }
+    const int16_t l = clamp16((int32_t)(((int64_t)main_l_[i] * v) >> 15) + t);
+    const int16_t r = clamp16((int32_t)(((int64_t)main_r_[i] * v) >> 15) + t);
     if (lr_addr) {
       wr16(lr_addr + (uint32_t)i * 4, (uint16_t)r);
       wr16(lr_addr + (uint32_t)i * 4 + 2, (uint16_t)l);
