@@ -42,6 +42,8 @@ log.txt
 *.csv
 *.ini
 *.txt
+# CMakeLists files are build input, not user notes.
+!CMakeLists.txt
 *.log
 # Per-game quirk profiles are runtime input, not user configuration.
 !nWiiRuntime/assets/games/*.toml

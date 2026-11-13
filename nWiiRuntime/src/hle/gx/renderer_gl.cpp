@@ -698,7 +698,7 @@ static void SetupDrawState(const GXCommand &cmd) {
     static int fn = 0;
     if (fn++ < 1) {
       FILE *f = std::fopen(
-          "/Users/bachnx/Projects/wii-lie/NWiiRecomp/.dev/rayman/frame_dump.txt",
+          "/Users/bachnx/Projects/wii-lie/.dev/rayman/frame_dump.txt",
           "w");
       if (f) {
         std::fprintf(f, "n=%zu prim=%02X numTev=%u numTexGens=%u numChans=%u\n",
@@ -1300,7 +1300,7 @@ public:
             glFinish();
             char path[256];
             std::snprintf(path, sizeof(path),
-                          "/Users/bachnx/Projects/wii-lie/NWiiRecomp/.dev/"
+                          "/Users/bachnx/Projects/wii-lie/.dev/"
                           "rayman/step_%02d_%zu.bmp",
                           step++, cmd.vertices.size());
             std::vector<unsigned char> px(640 * 480 * 4);
