@@ -38,6 +38,9 @@ private:
 
   void (*mail_sink_)(uint16_t) = nullptr;
 
+  // PB currently being mixed; keys the host-side ADPCM decoder state.
+  uint32_t cur_pb_ = 0;
+
   void push_mail(uint16_t lo);
   void copy_cmdlist(uint32_t addr, uint16_t size);
   void run_cmds();
