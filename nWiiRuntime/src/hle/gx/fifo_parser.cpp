@@ -940,6 +940,17 @@ void FifoParser::DecodeDraw(GXCommand& c) {
         if (off > buf_size)
             return;
 
+        // NWII_VTXDUMP: every vertex of the 312-vertex wordmark mesh, so the
+        // UV<->position mapping can be fitted offline and outliers (mis-paired
+        // indices) identified.
+        static const bool s_vtxdump = std::getenv("NWII_VTXDUMP") != nullptr;
+        if (s_vtxdump && r.count == 312) {
+            static int vd = 0;
+            if (vd++ < 400)
+                std::printf("[VTXDUMP] %u %.5f %.5f %.5f %.5f\n", i, vtx.pos[0],
+                            vtx.pos[1], vtx.tex[0][0], vtx.tex[0][1]);
+        }
+
         // NWII_IDXDBG: raw index bytes of the small per-letter meshes next to
         // the values they decode to.
         static const bool s_idxdbg = std::getenv("NWII_IDXDBG") != nullptr;
