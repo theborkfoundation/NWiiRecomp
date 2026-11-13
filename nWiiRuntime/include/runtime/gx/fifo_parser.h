@@ -35,6 +35,12 @@ struct DrawRaw {
     std::vector<float> snap_pos_bank;   // 256 floats = 64 slots of 3x4
     std::vector<float> snap_nrm_bank;   // 96 floats  = 32 slots of 3x3
     uint16_t count;
+    // NWII_IDXHASH: checksum of the position index array captured at parse
+    // time, compared at decode time to detect guest buffers being overwritten
+    // between parse and the deferred decode.
+    uint64_t idx_hash = 0;
+    uint32_t idx_base = 0;
+    uint32_t idx_len = 0;
     std::vector<uint8_t> bytes;
 };
 

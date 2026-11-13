@@ -387,11 +387,21 @@ static const int kMaxCompilesPerFrame = 12;
 // skips emitting its vertices instead of drawing them with the wrong shader.
 static bool s_skip_draw = false;
 
+// Ring of the most recent writes to XF position-matrix slot 0 (NWII_XFLOG).
+static int g_xfring_addr[40] = {0};
+static float g_xfring_val[40] = {0};
+static int g_xfring_n = 0;
+
 static void SetupDrawState(const GXCommand &cmd);
 static void EmitPrimitive(const GXCommand &cmd);
 
 static void DrawPrimitive(const GXCommand &cmd) {
   const auto &v = cmd.vertices;
+  // NWII_SOLO=<vertex count>: render only the draws with that many vertices so
+  // a single mesh's coverage and UV field can be inspected in isolation.
+  if (const char *solo = std::getenv("NWII_SOLO")) {
+    if ((int)v.size() != std::atoi(solo)) return;
+  }
   const size_t n = v.size();
   if (n == 0)
     return;
@@ -848,6 +858,37 @@ static void SetupDrawState(const GXCommand &cmd) {
                      g_state.projection[1], g_state.projection[2],
                      g_state.projection[3], g_state.projection[4],
                      g_state.projection[5]);
+        if (std::getenv("NWII_XFLOG")) {
+          const int n = g_xfring_n < 40 ? g_xfring_n : 40;
+          std::fprintf(stderr, "[LOGORING] %d recent slot-0 writes (newest "
+                       "last):\n", n);
+          for (int k = 0; k < n; ++k) {
+            const int idx = (g_xfring_n - n + k) % 40;
+            std::fprintf(stderr, "  addr=%03X val=%.5f\n", g_xfring_addr[idx],
+                         g_xfring_val[idx]);
+          }
+        }
+        {
+          const auto &w = cmd.vertices[0];
+          std::fprintf(stderr,
+                       "[LOGOTEX] n=%zu texidx=%u,%u,%u,%u,%u,%u,%u,%u "
+                       "info0=%08X info1=%08X\n",
+                       cmd.vertices.size(), w.texMtxIdx[0], w.texMtxIdx[1],
+                       w.texMtxIdx[2], w.texMtxIdx[3], w.texMtxIdx[4],
+                       w.texMtxIdx[5], w.texMtxIdx[6], w.texMtxIdx[7],
+                       g_state.xf[0x40], g_state.xf[0x41]);
+          for (int t = 0; t < 2; ++t) {
+            const int ti2 = (int)w.texMtxIdx[t];
+            if (ti2 * 4 + 8 <= 256) {
+              const float *tm = &g_state.posMatrices[(size_t)ti2 * 4];
+              std::fprintf(stderr,
+                           "[LOGOTEXM%d] ti=%d m=(%.3f %.3f %.3f %.3f | "
+                           "%.3f %.3f %.3f %.3f)\n",
+                           t, ti2, tm[0], tm[1], tm[2], tm[3], tm[4], tm[5],
+                           tm[6], tm[7]);
+            }
+          }
+        }
       }
     }
   }
@@ -973,9 +1014,24 @@ public:
           int current_addr = addr + (int)i;
           if (current_addr >= 0x1000 && current_addr < 0x1000 + 256) {
             std::memcpy(&g_state.xf[current_addr - 0x1000], &cmd.payload[i], 4);
+            // Record viewport writes (0x101A size, 0x101D origin) alongside the
+            // matrix ring: the GX viewport is not emulated yet, so this shows
+            // whether the game is using a non-fullscreen viewport.
+            if (current_addr == 0x101A || current_addr == 0x101D) {
+              g_xfring_addr[g_xfring_n % 40] = current_addr;
+              g_xfring_val[g_xfring_n % 40] = cmd.payload[i];
+              ++g_xfring_n;
+            }
           }
           if (current_addr >= 0x0000 && current_addr <= 0x00FF) {
             g_state.posMatrices[current_addr] = cmd.payload[i];
+            // NWII_XFLOG: keep the last writes to position-matrix slot 0 in a
+            // ring so they can be dumped next to the logo draw.
+            if (current_addr < 0x0C) {
+              g_xfring_addr[g_xfring_n % 40] = current_addr;
+              g_xfring_val[g_xfring_n % 40] = cmd.payload[i];
+              ++g_xfring_n;
+            }
           } else if (current_addr >= 0x0400 && current_addr <= 0x045F) {
             g_state.normalMatrices[current_addr - 0x0400] = cmd.payload[i];
           } else if (current_addr >= 0x0600 && current_addr <= 0x067F) {

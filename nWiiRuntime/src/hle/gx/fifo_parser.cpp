@@ -813,6 +813,22 @@ void FifoParser::DecodeDraw(GXCommand& c) {
     const DrawRaw& r = *c.raw;
     const std::vector<uint8_t>& buf = r.bytes;
     const size_t buf_size = buf.size();
+    // NWII_IDXHASH: report draws whose position index array changed between the
+    // parse-time snapshot and this deferred decode.
+    if (r.idx_hash && nwii::runtime::g_mmu) {
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t k = 0; k < r.idx_len; ++k) {
+            h ^= nwii::runtime::g_mmu->read8(r.idx_base + k);
+            h *= 1099511628211ull;
+        }
+        if (h != r.idx_hash) {
+            static int mn = 0;
+            if (mn++ < 20)
+                std::printf("[IDXCHG] n=%u base=%08X len=%u: array changed "
+                            "between parse and decode\n",
+                            (unsigned)r.count, r.idx_base, r.idx_len);
+        }
+    }
     // NWII_LOGOVAT: dump the vertex format actually used by the title-logo
     // meshes so a mismatched attribute type/shift is visible.
     static const bool s_logovat = std::getenv("NWII_LOGOVAT") != nullptr;
@@ -2083,6 +2099,25 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             c.raw->vat = vat;
             c.raw->defPosMtxIdx = g_state.defPosMtxIdx;
             std::memcpy(c.raw->defTexMtxIdx, g_state.defTexMtxIdx, 8);
+            // NWII_IDXHASH: checksum the position index array as it looks right
+            // now, so the deferred decode can tell whether the guest has
+            // overwritten it in the meantime.
+            if ((vat.posMask == VtxAttrMask::Index8 ||
+                 vat.posMask == VtxAttrMask::Index16) &&
+                g_state.arrayBase[0] && g_state.arrayStride[0] &&
+                nwii::runtime::g_mmu &&
+                std::getenv("NWII_IDXHASH") != nullptr) {
+                const uint32_t n =
+                    std::min<uint32_t>(g_state.arrayStride[0] * 64u, 2048u);
+                uint64_t h = 1469598103934665603ull;
+                for (uint32_t k = 0; k < n; ++k) {
+                    h ^= nwii::runtime::g_mmu->read8(g_state.arrayBase[0] + k);
+                    h *= 1099511628211ull;
+                }
+                c.raw->idx_hash = h;
+                c.raw->idx_base = g_state.arrayBase[0];
+                c.raw->idx_len = n;
+            }
             // Snapshot this draw's position/normal matrix from the parse-time
             // shadow, unless the draw carries a per-vertex matrix index (then
             // each vertex may use a different matrix — fall back to live).
