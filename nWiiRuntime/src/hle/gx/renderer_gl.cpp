@@ -1087,6 +1087,17 @@ public:
       glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
 
+    // NWII_FRAMELIST: record every draw of the frame and print the whole list
+    // once a title-logo draw is seen, so per-letter draws before and after it
+    // are both visible.
+    static const bool s_framelist =
+        std::getenv("NWII_FRAMELIST") != nullptr;
+    static bool s_fl_dumped = false;
+    static bool s_fl_logo = false;
+    static std::vector<std::string> s_fl;
+    if (s_framelist && !s_fl_dumped)
+      s_fl.clear();
+
     for (const auto &cmd : commands) {
 
       if (cmd.type != GXCommandType::DrawPrimitive && s_batch_open) {
@@ -1250,6 +1261,32 @@ public:
           }
         }
         DrawPrimitive(cmd);
+        if (s_framelist && !s_fl_dumped && !cmd.vertices.empty()) {
+          float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+          float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+          for (const auto &vv : cmd.vertices) {
+            x0 = std::fmin(x0, vv.pos[0]); x1 = std::fmax(x1, vv.pos[0]);
+            y0 = std::fmin(y0, vv.pos[1]); y1 = std::fmax(y1, vv.pos[1]);
+            if (vv.has_tex[0]) {
+              u0 = std::fmin(u0, vv.tex[0][0]);
+              u1 = std::fmax(u1, vv.tex[0][0]);
+              v0 = std::fmin(v0, vv.tex[0][1]);
+              v1 = std::fmax(v1, vv.tex[0][1]);
+            }
+          }
+          char line[256];
+          std::snprintf(line, sizeof(line),
+                        "n=%zu prim=%02X t0=%08X t1=%08X x[%.1f %.1f] "
+                        "y[%.1f %.1f] u[%.3f %.3f] v[%.3f %.3f]",
+                        cmd.vertices.size(), cmd.prim_type,
+                        g_state.texStages[0].base_addr,
+                        g_state.texStages[1].base_addr, x0, x1, y0, y1, u0, u1,
+                        v0, v1);
+          s_fl.push_back(line);
+          if (g_state.texStages[0].base_addr == 0x105A40E0u &&
+              g_state.bp[0xC0] == 0x08FA8F && x1 > 200.0f)
+            s_fl_logo = true;
+        }
         // NWII_LOGO_STEPS: dump the framebuffer after each title-logo draw so
         // the contribution (and overdraw order) of every layer is visible.
         static const bool s_steps =
@@ -1296,6 +1333,12 @@ public:
     if (s_batch_open) {
       FlushBatch();
       s_batch_open = false;
+    }
+    if (s_framelist && !s_fl_dumped && s_fl_logo) {
+      s_fl_dumped = true;
+      std::fprintf(stderr, "[FRAMELIST] %zu draws\n", s_fl.size());
+      for (size_t i = 0; i < s_fl.size(); ++i)
+        std::fprintf(stderr, "  [%zu] %s\n", i, s_fl[i].c_str());
     }
   }
 

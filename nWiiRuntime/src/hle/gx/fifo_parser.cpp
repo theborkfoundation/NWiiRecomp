@@ -863,6 +863,7 @@ void FifoParser::DecodeDraw(GXCommand& c) {
         (size_t)r.count * 2 == buf_size;
     for (uint32_t i = 0; i < r.count; i++) {
         VertexData vtx;
+        const size_t vstart = off;
         vtx.posMtxIdx = r.defPosMtxIdx;
         for (int t = 0; t < 8; t++)
             vtx.texMtxIdx[t] = r.defTexMtxIdx[t];
@@ -938,6 +939,39 @@ void FifoParser::DecodeDraw(GXCommand& c) {
                              r.vat.texElements[t] ? 2 : 1, false);
         if (off > buf_size)
             return;
+
+        // NWII_IDXDBG: raw index bytes of the small per-letter meshes next to
+        // the values they decode to.
+        static const bool s_idxdbg = std::getenv("NWII_IDXDBG") != nullptr;
+        if (s_idxdbg && i == 0 && r.count == 288) {
+            std::printf("[LETTERMTX] snap=%.3f %.3f %.3f %.3f | %.3f %.3f "
+                        "%.3f %.3f  have=%d bank=%zu\n",
+                        r.snap_pos_mtx[0], r.snap_pos_mtx[1], r.snap_pos_mtx[2],
+                        r.snap_pos_mtx[3], r.snap_pos_mtx[4], r.snap_pos_mtx[5],
+                        r.snap_pos_mtx[6], r.snap_pos_mtx[7],
+                        (int)r.have_snap_mtx, r.snap_pos_bank.size());
+            std::printf("[LETTERMTX] shadow=%.3f %.3f %.3f %.3f | %.3f %.3f "
+                        "%.3f %.3f  live=%.3f %.3f %.3f %.3f | %.3f %.3f "
+                        "%.3f %.3f\n",
+                        g_parse_posmtx[0], g_parse_posmtx[1], g_parse_posmtx[2],
+                        g_parse_posmtx[3], g_parse_posmtx[4], g_parse_posmtx[5],
+                        g_parse_posmtx[6], g_parse_posmtx[7],
+                        g_state.posMatrices[0], g_state.posMatrices[1],
+                        g_state.posMatrices[2], g_state.posMatrices[3],
+                        g_state.posMatrices[4], g_state.posMatrices[5],
+                        g_state.posMatrices[6], g_state.posMatrices[7]);
+        }
+        if (s_idxdbg && (r.count == 24 || r.count == 72)) {
+            static int shown = 0;
+            if (shown < 18 && i < 6) {
+                std::printf("[IDXDBG] n=%u i=%u bytes", r.count, i);
+                for (size_t b = 0; b < 6 && vstart + b < buf.size(); ++b)
+                    std::printf(" %02X", buf[vstart + b]);
+                std::printf(" pos=(%.3f,%.3f) uv=(%.4f,%.4f)\n", vtx.pos[0],
+                            vtx.pos[1], vtx.tex[0][0], vtx.tex[0][1]);
+                ++shown;
+            }
+        }
 
         // NWII_LOGORAW: raw (pre-matrix) position/uv of the letters mesh.
         static const bool s_logoraw = std::getenv("NWII_LOGORAW") != nullptr;
