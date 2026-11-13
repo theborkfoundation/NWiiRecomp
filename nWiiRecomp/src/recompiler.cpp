@@ -2349,7 +2349,7 @@ void Recompiler::emit_instruction(std::ostream &out,
           << ", __builtin_bswap32(ctx.gpr[" << ppc_inst.rs()
           << "])); // stwbrx\n";
     } else if (xo == 1014) { 
-      out << "    // dcbz (data cache block zero) - stub\n";
+      out << "    ctx.clear_cache_line(" << indexed_ea << "); // dcbz\n";
     } else if (xo == 55) { 
       out << "    { uint32_t ea = ctx.gpr[" << rA << "] + ctx.gpr[" << rB
           << "]; ";
@@ -2573,7 +2573,9 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.ps_cmpo1(" << (frD >> 2) << ", " << frA << ", " << frB
           << ");\n";
     } else if (xo_10 == 1014) {
-      out << "    // dcbz_l (no-op)\n";
+      out << "    ctx.clear_cache_line("
+          << (frA ? "ctx.gpr[" + std::to_string(frA) + "]" : "0u")
+          << " + ctx.gpr[" << frB << "]); // dcbz_l\n";
     } else if (xo == 26) {
       out << "    ctx.fpr[" << frD << "] = 1.0 / std::sqrt(ctx.fpr[" << frB
           << "]); ctx.ps1[" << frD << "] = 1.0 / std::sqrt(ctx.ps1[" << frB

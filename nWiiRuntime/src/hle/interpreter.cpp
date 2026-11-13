@@ -372,8 +372,7 @@ bool interpret_one(CPUContext& ctx) {
             break;
         }
         case 1014: { 
-            uint32_t ea = (ea_ra0(0) + ctx.gpr[rB]) & ~31u;
-            for (int i = 0; i < 32; i += 4) ctx.mmu.write32(ea + i, 0);
+            ctx.clear_cache_line(ea_ra0(0) + ctx.gpr[rB]);
             break;
         }
         
@@ -590,7 +589,7 @@ bool interpret_one(CPUContext& ctx) {
         case 560: ctx.ps_merge01(rD, rA, rB); break;
         case 592: ctx.ps_merge10(rD, rA, rB); break;
         case 624: ctx.ps_merge11(rD, rA, rB); break;
-        case 1014: break; 
+        case 1014: ctx.clear_cache_line(ea_ra0(0) + ctx.gpr[rB]); break;
         default:
             std::cerr << "[Interp] Unhandled op4 xo=" << xo10 << " at 0x"
                       << std::hex << pc << std::dec << " (nop)\n";

@@ -38,6 +38,11 @@ int main(int argc, char** argv) {
     auto x = [](unsigned xo, unsigned rt, unsigned ra, unsigned rb) {
         return (31u << 26) | (rt << 21) | (ra << 16) | (rb << 11) | (xo << 1);
     };
+    // dcbz and dcbz_l both clear an aligned cache line; RA=0 is literal zero.
+    emit(0x80011200, {x(1014, 0, 0, 3), 0x4e800020});
+    emit(0x80011210, {x(1014, 0, 4, 3), 0x4e800020});
+    emit(0x80011220, {(4u << 26) | (3u << 11) | (1014u << 1), 0x4e800020});
+    emit(0x80011230, {(4u << 26) | (4u << 16) | (3u << 11) | (1014u << 1), 0x4e800020});
     // Carry consumers make these tests fail if the producer leaves stale CA.
     emit(0x80011000, {d(8, 5, 3, -1), x(202, 6, 4, 0), 0x4e800020});
     emit(0x80011010, {d(8, 3, 3, 0), x(202, 5, 4, 0), 0x4e800020});

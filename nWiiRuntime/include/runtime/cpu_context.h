@@ -591,6 +591,14 @@ struct CPUContext {
   CPUContext() : gpr{0}, fpr{0.0}, ps1{0.0}, cr{}, pc(0), lr(0), ctr(0), xer(0), 
                  msr(0), fpscr(0), srr0(0), srr1(0), gqr{0}, exception_pc(0), is_running(true), vblank_pending(false) {}
 
+  // The Wii CPU's data cache line is 32 bytes. dcbz clears the whole
+  // aligned line, including bytes before the effective address.
+  void clear_cache_line(uint32_t addr) {
+    addr &= ~31u;
+    for (uint32_t i = 0; i < 32; i += 4)
+      mmu.write32(addr + i, 0);
+  }
+
   void queue_callback(uint32_t cb, uint32_t arg1, uint32_t arg2, bool is_irq = false) {
     std::lock_guard<std::mutex> lock(cb_mutex);
     pending_callbacks.push({cb, arg1, arg2, is_irq});

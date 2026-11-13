@@ -118,6 +118,20 @@ int main() {
         }
     }
     auto run = [&](Fn fn, unsigned pc) { ctx->pc = pc; fn(*ctx); require(ctx->pc == ctx->lr); };
+    {
+        const Fn clear[] = {func_80011200, func_80011210, func_80011220, func_80011230};
+        for (unsigned i = 0; i < 4; ++i) {
+            auto& c = *ctx;
+            constexpr uint32_t addr = 0x80008100;
+            for (unsigned k = 0; k < 96; ++k) c.mmu.write8(addr + k, 0xa5);
+            c.gpr[0] = 0x1000; // RA=0 must ignore this register.
+            c.gpr[3] = addr + 43 - (i % 2 ? 7 : 0);
+            c.gpr[4] = 7;
+            run(clear[i], 0x80011200 + i * 0x10);
+            for (unsigned k = 0; k < 96; ++k)
+                require(c.mmu.read8(addr + k) == (k >= 32 && k < 64 ? 0 : 0xa5));
+        }
+    }
     for (unsigned input : {0u, 1u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
         ctx->gpr[3] = input; ctx->gpr[4] = 0; ctx->xer = 0x80000000u;
         run(func_80011000, 0x80011000);
