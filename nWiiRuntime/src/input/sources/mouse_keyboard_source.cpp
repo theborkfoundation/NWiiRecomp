@@ -2,6 +2,7 @@
 #include "runtime/config.h"
 #include <SDL.h>
 #include <cstdlib>
+#include <string>
 
 namespace nwii::runtime::input {
 
@@ -35,8 +36,8 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
             keys[SDL_SCANCODE_K]        ||
             keys[SDL_SCANCODE_2]        ||
             keys[SDL_SCANCODE_X]) {
-            motes[0].buttons |= 0x0001; // WPAD_BUTTON_2 (Jump / Select)
-            motes[0].buttons |= 0x0008; // WPAD_BUTTON_A (Accept)
+            motes[0].buttons |= 0x0100; // WPAD_BUTTON_2 (Jump / Select)
+            motes[0].buttons |= 0x0800; // WPAD_BUTTON_A (Accept)
         }
 
         // Wiimote 1 & B (Attack / Run / Back):
@@ -46,27 +47,27 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
             keys[SDL_SCANCODE_1]      ||
             keys[SDL_SCANCODE_Z]      ||
             keys[SDL_SCANCODE_LSHIFT]) {
-            motes[0].buttons |= 0x0002; // WPAD_BUTTON_1 (Attack / Dash)
-            motes[0].buttons |= 0x0004; // WPAD_BUTTON_B (Back / Bubble)
+            motes[0].buttons |= 0x0200; // WPAD_BUTTON_1 (Attack / Dash)
+            motes[0].buttons |= 0x0400; // WPAD_BUTTON_B (Back / Bubble)
         }
 
         // Wiimote B (Bubble):
         if (keys[SDL_SCANCODE_C]) {
-            motes[0].buttons |= 0x0004; // WPAD_BUTTON_B
+            motes[0].buttons |= 0x0400; // WPAD_BUTTON_B
         }
 
         // Wiimote Plus (Pause / Menu):
         if (keys[SDL_SCANCODE_ESCAPE] ||
             keys[SDL_SCANCODE_P]      ||
             keys[SDL_SCANCODE_EQUALS]) {
-            motes[0].buttons |= 0x1000; // WPAD_BUTTON_PLUS
+            motes[0].buttons |= 0x0010; // WPAD_BUTTON_PLUS
         }
 
         // Wiimote Minus (Select / Stats):
         if (keys[SDL_SCANCODE_MINUS]     ||
             keys[SDL_SCANCODE_TAB]       ||
             keys[SDL_SCANCODE_BACKSPACE]) {
-            motes[0].buttons |= 0x0010; // WPAD_BUTTON_MINUS
+            motes[0].buttons |= 0x1000; // WPAD_BUTTON_MINUS
         }
 
         // Directional controls (Arrow keys & WASD):
@@ -75,22 +76,24 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
         bool k_up    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
         bool k_down  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
 
-        if (is_horizontal) {
-            // Horizontal Wiimote physical mapping:
-            // Physical UP (0x0800) is Left
-            // Physical DOWN (0x0400) is Right
-            // Physical RIGHT (0x0200) is Up
-            // Physical LEFT (0x0100) is Down
-            if (k_left)  motes[0].buttons |= 0x0800; // Rayman Left (act 0)
-            if (k_right) motes[0].buttons |= 0x0400; // Rayman Right (act 1)
-            if (k_up)    motes[0].buttons |= 0x0200; // Rayman Up (act 19)
-            if (k_down)  motes[0].buttons |= 0x0100; // Rayman Down (act 20)
+        // Wiimote orientation: a horizontal remote has its D-pad rotated 90
+        // degrees, so the physical direction that means "left" reports UP.
+        // Per-game default is horizontal for SOJ/SMN titles; NWII_REMOTE=
+        // horizontal|vertical overrides it.
+        bool horiz = is_horizontal;
+        if (const char *r = std::getenv("NWII_REMOTE")) {
+            horiz = (std::string(r) == "horizontal");
+        }
+        if (horiz) {
+            if (k_left)  motes[0].buttons |= 0x0008; // report UP    -> action Left
+            if (k_right) motes[0].buttons |= 0x0004; // report DOWN  -> action Right
+            if (k_up)    motes[0].buttons |= 0x0002; // report RIGHT -> action Up
+            if (k_down)  motes[0].buttons |= 0x0001; // report LEFT  -> action Down
         } else {
-            // Standard vertical Wiimote mapping:
-            if (k_left)  motes[0].buttons |= 0x0100; // WPAD_BUTTON_LEFT
-            if (k_right) motes[0].buttons |= 0x0200; // WPAD_BUTTON_RIGHT
-            if (k_up)    motes[0].buttons |= 0x0800; // WPAD_BUTTON_UP
-            if (k_down)  motes[0].buttons |= 0x0400; // WPAD_BUTTON_DOWN
+            if (k_left)  motes[0].buttons |= 0x0001; // WPAD_BUTTON_LEFT
+            if (k_right) motes[0].buttons |= 0x0002; // WPAD_BUTTON_RIGHT
+            if (k_up)    motes[0].buttons |= 0x0008; // WPAD_BUTTON_UP
+            if (k_down)  motes[0].buttons |= 0x0004; // WPAD_BUTTON_DOWN
         }
 
         // Classic Controller extension (used when NWII_INPUT=classic):

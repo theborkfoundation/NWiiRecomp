@@ -3,6 +3,7 @@
 #include <SDL.h>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 
 namespace nwii::runtime::input {
 
@@ -60,41 +61,41 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         // Official RVL_SDK Wiimote Buttons:
         // A (South) -> Button 2 (Jump) & Button A (Select)
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) {
-            motes[i].buttons |= 0x0001; // WPAD_BUTTON_2
-            motes[i].buttons |= 0x0008; // WPAD_BUTTON_A
+            motes[i].buttons |= 0x0100; // WPAD_BUTTON_2
+            motes[i].buttons |= 0x0800; // WPAD_BUTTON_A
         }
         // X (West) -> Button 1 (Attack / Dash)
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X)) {
-            motes[i].buttons |= 0x0002; // WPAD_BUTTON_1
+            motes[i].buttons |= 0x0200; // WPAD_BUTTON_1
         }
         // B (East) -> Button B (Back / Bubble)
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B)) {
-            motes[i].buttons |= 0x0004; // WPAD_BUTTON_B
+            motes[i].buttons |= 0x0400; // WPAD_BUTTON_B
         }
         // Y (North) -> Button 1 (Attack)
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y)) {
-            motes[i].buttons |= 0x0002; // WPAD_BUTTON_1
+            motes[i].buttons |= 0x0200; // WPAD_BUTTON_1
         }
 
         // Shoulders / Triggers:
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ||
             SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384) {
-            motes[i].buttons |= 0x0002; // Button 1 (Sprint / Dash)
+            motes[i].buttons |= 0x0200; // WPAD_BUTTON_1 (Sprint / Dash)
         }
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ||
             SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16384) {
-            motes[i].buttons |= 0x0004; // Button B (Bubble / Back)
+            motes[i].buttons |= 0x0400; // WPAD_BUTTON_B (Bubble / Back)
         }
 
         // System Buttons:
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) {
-            motes[i].buttons |= 0x1000; // WPAD_BUTTON_PLUS
+            motes[i].buttons |= 0x0010; // WPAD_BUTTON_PLUS
         }
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) {
-            motes[i].buttons |= 0x0010; // WPAD_BUTTON_MINUS
+            motes[i].buttons |= 0x1000; // WPAD_BUTTON_MINUS
         }
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) {
-            motes[i].buttons |= 0x0080; // WPAD_BUTTON_HOME
+            motes[i].buttons |= 0x8000; // WPAD_BUTTON_HOME
         }
 
         // D-Pad and Left Analog Stick:
@@ -110,16 +111,20 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         if (ly < -16000) d_up = true;
         if (ly >  16000) d_down = true;
 
-        if (is_horizontal) {
-            if (d_left)  motes[i].buttons |= 0x0800; // Left
-            if (d_right) motes[i].buttons |= 0x0400; // Right
-            if (d_up)    motes[i].buttons |= 0x0200; // Up
-            if (d_down)  motes[i].buttons |= 0x0100; // Down
+        bool horiz = is_horizontal;
+        if (const char *r = std::getenv("NWII_REMOTE")) {
+            horiz = (std::string(r) == "horizontal");
+        }
+        if (horiz) {
+            if (d_left)  motes[i].buttons |= 0x0008; // report UP    -> action Left
+            if (d_right) motes[i].buttons |= 0x0004; // report DOWN  -> action Right
+            if (d_up)    motes[i].buttons |= 0x0002; // report RIGHT -> action Up
+            if (d_down)  motes[i].buttons |= 0x0001; // report LEFT  -> action Down
         } else {
-            if (d_left)  motes[i].buttons |= 0x0100; // WPAD_BUTTON_LEFT
-            if (d_right) motes[i].buttons |= 0x0200; // WPAD_BUTTON_RIGHT
-            if (d_up)    motes[i].buttons |= 0x0800; // WPAD_BUTTON_UP
-            if (d_down)  motes[i].buttons |= 0x0400; // WPAD_BUTTON_DOWN
+            if (d_left)  motes[i].buttons |= 0x0001; // WPAD_BUTTON_LEFT
+            if (d_right) motes[i].buttons |= 0x0002; // WPAD_BUTTON_RIGHT
+            if (d_up)    motes[i].buttons |= 0x0008; // WPAD_BUTTON_UP
+            if (d_down)  motes[i].buttons |= 0x0004; // WPAD_BUTTON_DOWN
         }
 
         // Classic Controller extension (WPAD_CL_* bits):
