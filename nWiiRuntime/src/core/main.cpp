@@ -313,13 +313,26 @@ int main(int argc, char **argv) {
       std::cerr << "[XFB] disabling XFB present path (init failed)"
                 << std::endl;
 
+    // Hidden capture runs must not make noise on the host: a test run and the
+    // windowed session would otherwise fight over the audio device.
+    const bool quiet = std::getenv("NWII_HIDDEN_WINDOW") &&
+                       !std::getenv("NWII_HIDDEN_AUDIO");
     SDL_AudioSpec want = {0}, have;
     want.freq = 32000;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.samples = 1024;
-    audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (audio_dev > 0) SDL_PauseAudioDevice(audio_dev, 0);
+    audio_dev = quiet ? 0 : SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    if (audio_dev > 0) {
+      std::cout << "[Audio] requested " << want.freq << " Hz, got " << have.freq
+                << " Hz fmt=0x" << std::hex << have.format << std::dec
+                << " ch=" << (int)have.channels
+                << " samples=" << have.samples << std::endl;
+      SDL_PauseAudioDevice(audio_dev, 0);
+    } else {
+      std::cerr << "[Audio] SDL_OpenAudioDevice failed: " << SDL_GetError()
+                << std::endl;
+    }
   }
 
   auto ctx = std::make_unique<nwii::runtime::CPUContext>();
@@ -561,9 +574,14 @@ int main(int argc, char **argv) {
     static const char *trig_env = std::getenv("NWII_MEMDUMP_TRIGGER");
     static uint32_t trig =
         trig_env ? (uint32_t)std::strtoul(trig_env, nullptr, 16) : 0;
+    static const char *sig_path = std::getenv("NWII_MEMDUMP_SIGNAL");
+    static const char *at_env = std::getenv("NWII_MEMDUMP_AT");
+    static int at_sec = at_env ? std::atoi(at_env) : 0;
+    static auto t0 = std::chrono::steady_clock::now();
+    static bool timed_done = false;
     static int state = 0;  // 0 waiting, 1 counting down, 2 done
     static int countdown = 0;
-    if (!prefix || !trig || state == 2)
+    if (!prefix || state == 2)
       return;
     auto dump = [&](const char *tag) {
       for (int bank = 0; bank < 2; ++bank) {
@@ -576,6 +594,26 @@ int main(int argc, char **argv) {
         }
       }
     };
+    if (sig_path && std::remove(sig_path) == 0) {
+      dump("a");
+      state = 1;
+      countdown = 45;
+      std::cout << "[MEMDUMP] signal -> " << prefix << ".a.*\n";
+      return;
+    }
+    if (at_sec > 0 && !timed_done &&
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - t0).count() >= at_sec) {
+      timed_done = true;
+      dump("a");
+      state = 1;
+      countdown = 45;
+      std::cout << "[MEMDUMP] timed " << at_sec << "s -> " << prefix
+                << ".a.*\n";
+      return;
+    }
+    if (!trig)
+      return;
     if (state == 0) {
       if (ctx->mmu.read32(trig) != 0) {
         dump("a");

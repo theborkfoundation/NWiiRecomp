@@ -73,11 +73,12 @@ void write_pb(uint32_t addr, const ax::AXPBWii &pb) {
 // Host-side DSP ADPCM decoder state, one entry per PB. Keeping it out of the
 // guest PB avoids clobbering the initial history the game programs on start.
 struct AdpcmState {
-  uint32_t frame = 0;
-  uint32_t pos = 0;      // 16.16 position inside the 14-sample frame
+  uint32_t frame = 0;  // nibble address
+  uint32_t pos = 0;    // 16.16 fractional sample position
   int next_idx = 0;
   int32_t cur = 0;
   int32_t yn1 = 0, yn2 = 0;
+  uint16_t ps = 0;     // current pred/scale byte
   bool init = false;
 };
 std::unordered_map<uint32_t, AdpcmState> g_adpcm;
@@ -159,6 +160,7 @@ void AXHle::run_cmds() {
   uint32_t i = 0;
   bool end = false;
   uint32_t guard = 0;
+  int process_cmds = 0;
   while (!end && i < sizeof(cmd_) / 2 && guard++ < 512) {
     const uint16_t cmd = cmd_[i++];
     switch (cmd) {
@@ -188,6 +190,7 @@ void AXHle::run_cmds() {
     }
     case 0x04: { // PROCESS
       pb_addr = ((uint32_t)cmd_[i] << 16) | cmd_[i + 1];
+      ++process_cmds;
       i += 2;
       if (axdbg())
         std::printf("[AX] PROCESS pb=%08X\n", pb_addr);
@@ -230,6 +233,11 @@ void AXHle::run_cmds() {
       end = true;
       break;
     }
+  }
+  if (std::getenv("NWII_SNDLOG") && process_cmds != 1) {
+    static int n = 0;
+    if (n++ < 10)
+      std::printf("[AX] list had %d PROCESS commands\n", process_cmds);
   }
 }
 
@@ -296,9 +304,24 @@ void AXHle::process_pbs(uint32_t addr) {
         start += counts[ms];
         {
           static std::unordered_map<uint32_t, bool> last_run;
-          if (pb.running == 1 && !last_run[addr])
+          const bool started = pb.running == 1 && !last_run[addr];
+          if (started)
             g_adpcm.erase(addr);
           last_run[addr] = (pb.running == 1);
+          if (started && std::getenv("NWII_SNDLOG")) {
+            static int n = 0;
+            if (n++ < 40)
+              std::printf("[SFX] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
+                          "ml=%u mr=%u mc=%u\n",
+                          addr, pb.audio_addr.sample_format,
+                          hilo(pb.audio_addr.cur_addr_hi, pb.audio_addr.cur_addr_lo),
+                          hilo(pb.audio_addr.end_addr_hi, pb.audio_addr.end_addr_lo),
+                          (unsigned)pb.vol_env.cur_volume,
+                          (unsigned)pb.mixer.main_left.volume,
+                          (unsigned)pb.mixer.main_right.volume,
+                          ((unsigned)pb.mixer_control_hi << 16) |
+                              pb.mixer_control_lo);
+          }
         }
         cur_pb_ = addr;
         process_voice(pb, ms * 32, 32);
@@ -306,9 +329,24 @@ void AXHle::process_pbs(uint32_t addr) {
     } else {
       {
         static std::unordered_map<uint32_t, bool> last_run;
-        if (pb.running == 1 && !last_run[addr])
+        const bool started = pb.running == 1 && !last_run[addr];
+        if (started)
           g_adpcm.erase(addr);
         last_run[addr] = (pb.running == 1);
+        if (started && std::getenv("NWII_SNDLOG")) {
+          static int n = 0;
+          if (n++ < 40)
+            std::printf("[SFX] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
+                        "ml=%u mr=%u mc=%u\n",
+                        addr, pb.audio_addr.sample_format,
+                        hilo(pb.audio_addr.cur_addr_hi, pb.audio_addr.cur_addr_lo),
+                        hilo(pb.audio_addr.end_addr_hi, pb.audio_addr.end_addr_lo),
+                        (unsigned)pb.vol_env.cur_volume,
+                        (unsigned)pb.mixer.main_left.volume,
+                        (unsigned)pb.mixer.main_right.volume,
+                        ((unsigned)pb.mixer_control_hi << 16) |
+                            pb.mixer_control_lo);
+        }
       }
       cur_pb_ = addr;
       process_voice(pb, 0, 96);
@@ -367,6 +405,13 @@ void AXHle::process_pbs(uint32_t addr) {
 void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
   if (pb.running != 1)
     return;
+  // Isolation aids: drop one voice class to hear the other alone.
+  static const bool sfx_only = std::getenv("NWII_SFXONLY") != nullptr;
+  static const bool no_adpcm = std::getenv("NWII_NOADPCM") != nullptr;
+  if (sfx_only && pb.audio_addr.sample_format == 10)
+    return;
+  if (no_adpcm && pb.audio_addr.sample_format == 0)
+    return;
 
   // AX stores sample addresses in 16-bit word units. Doubling a value such as
   // 0x08538650 lands at 0x10A70CA0, inside MEM2 physical space; map it to the
@@ -377,6 +422,11 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
       if (b >= 0x10000000u && b < 0x14000000u)
         return 0x90000000u + (uint32_t)(b - 0x10000000u);
     }
+    // AX sample addresses carry a 0x2xxxxxxx tag; the low 24 bits are the DSP
+    // ARAM offset. This runtime backs ARAM with MEM2 (the ARAM DMA copies into
+    // MEM2 at that offset), so read it through the MEM2 window.
+    if (a >= 0x20000000u && a < 0x30000000u)
+      return 0x90000000u | (a & 0x00FFFFFFu);
     return a;
   };
 
@@ -384,10 +434,17 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
   uint32_t addr = hilo(pb.audio_addr.cur_addr_hi, pb.audio_addr.cur_addr_lo);
   uint32_t end = hilo(pb.audio_addr.end_addr_hi, pb.audio_addr.end_addr_lo);
   uint32_t loop = hilo(pb.audio_addr.loop_addr_hi, pb.audio_addr.loop_addr_lo);
-  const bool word_addr = (addr >= 0x08000000u && addr < 0x10000000u);
-  addr = xlat(addr);
-  end = xlat(end);
-  loop = xlat(loop);
+  bool word_addr = (addr >= 0x08000000u && addr < 0x10000000u);
+  bool mem1_addr = (addr >= 0x20000000u && addr < 0x30000000u);
+  if (fmt != 0) {
+    addr = xlat(addr);
+    end = xlat(end);
+    loop = xlat(loop);
+  } else {
+    // ADPCM addresses are nibble addresses and are translated per byte read.
+    word_addr = false;
+    mem1_addr = false;
+  }
   uint32_t ratio = hilo(pb.src.ratio_hi, pb.src.ratio_lo);
   if (ratio == 0)
     ratio = 0x10000;
@@ -415,50 +472,81 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
   }
 
   if (fmt == 0) {
-    // DSP ADPCM: 8-byte frames: 1 header byte (predictor<<4 | scale), then 14
-    // signed 4-bit samples. The decoder history must advance for every source
-    // sample, including ones the SRC skips.
+    // The DSP reads AX samples as nibbles: address = nibble index, byte =
+    // nibble>>1. Each 8-byte frame starts with a pred/scale byte (two nibbles
+    // skipped) followed by 14 samples. Addresses with bit 28 set read ARAM
+    // (backed by MEM2 here); others read MEM1.
+    auto byte_addr = [](uint32_t nib) -> uint32_t {
+      const uint32_t b = nib >> 1;
+      if (b & 0x10000000u)
+        return 0x90000000u | (b & 0x00FFFFFFu);
+      return 0x80000000u | (b & 0x01FFFFFFu);
+    };
+
     AdpcmState &st = g_adpcm[cur_pb_];
     if (!st.init || st.frame != addr) {
       st.frame = addr;
       st.pos = 0;
-      st.next_idx = 0;
       st.cur = 0;
       st.yn1 = (int16_t)pb.adpcm.yn1;
       st.yn2 = (int16_t)pb.adpcm.yn2;
+      st.ps = pb.adpcm.pred_scale;
       st.init = true;
     }
-    uint32_t frame = st.frame;
-    uint32_t pos = st.pos;
-    int next_idx = st.next_idx;
+    uint32_t nib = st.frame;
+    uint32_t afrac = st.pos;
     int32_t cur = st.cur;
-    int32_t yn1 = st.yn1;
-    int32_t yn2 = st.yn2;
+    int32_t yn1 = st.yn1, yn2 = st.yn2;
+    uint16_t ps = st.ps;
     const s16 *coefs = pb.adpcm.coefs;
+    const bool looping = pb.audio_addr.looping != 0;
 
-    auto decode_frame_sample = [&](int idx) {
-      const uint8_t ps = rd8(frame);
-      const int nib_byte = rd8(frame + 1 + idx / 2);
-      int nib = (idx & 1) ? (nib_byte & 0xF) : (nib_byte >> 4);
-      if (nib & 0x8)
-        nib -= 16;
-      const int scale = 1 << (ps & 0xF);
-      const int pred = (ps >> 4) & 0x7;
-      int32_t s = (nib << 11) >> scale;
-      s += (coefs[pred * 2] * yn1 + coefs[pred * 2 + 1] * yn2 + 0x400) >> 11;
-      s = clamp16(s);
-      yn2 = yn1;
-      yn1 = s;
-      return s;
-    };
+    int32_t metric_prev = 0, metric_peak = 0;
+    int64_t metric_diff = 0;
 
     for (int i = 0; i < count; ++i) {
-      const int want = (int)(pos >> 16);
-      while (next_idx <= want && next_idx < 14)
-        cur = decode_frame_sample(next_idx++);
+      afrac += ratio;
+      while (afrac >= 0x10000) {
+        afrac -= 0x10000;
+        if ((nib & 15) == 0) {
+          ps = rd8(byte_addr(nib));
+          nib += 2;
+        }
+        const uint8_t byte = rd8(byte_addr(nib));
+        int nibble = (nib & 1) ? (byte & 0xF) : (byte >> 4);
+        if (nibble & 0x8)
+          nibble -= 16;
+        const int scale = 1 << (ps & 0xF);
+        const int pred = (ps >> 4) & 0x7;
+        int32_t s = scale * nibble +
+                    ((0x400 + coefs[pred * 2] * yn1 + coefs[pred * 2 + 1] * yn2) >> 11);
+        s = clamp16(s);
+        yn2 = yn1;
+        yn1 = s;
+        cur = s;
+        ++nib;
+        if (end && nib > end) {
+          if (looping) {
+            nib = loop;
+            yn1 = (int16_t)pb.adpcm_loop_info.yn1;
+            yn2 = (int16_t)pb.adpcm_loop_info.yn2;
+            ps = (uint16_t)pb.adpcm_loop_info.pred_scale;
+            afrac = 0;
+          } else {
+            pb.running = 0;
+            break;
+          }
+        }
+      }
 
-      int32_t s = cur;
-      s = (s * vol) >> 15;
+      if (std::getenv("NWII_SNDLOG")) {
+        if (i)
+          metric_diff += std::abs((int)cur - metric_prev);
+        metric_prev = cur;
+        metric_peak = std::max(metric_peak, std::abs((int)cur));
+      }
+
+      int32_t s = (cur * vol) >> 15;
       vol += vdelta;
       if (mix_l)
         main_l_[offset + i] += (s * ml) >> 15;
@@ -466,34 +554,82 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
         main_r_[offset + i] += (s * mr) >> 15;
       ml += mdl;
       mr += mdr;
+    }
 
-      pos += ratio;
-      if (pos >= (14u << 16)) {
-        pos -= 14u << 16;
-        frame += 8;
-        next_idx = 0;
-        if (end && frame > end) {
-          if (pb.audio_addr.looping) {
-            frame = loop;
-            yn1 = (int16_t)pb.adpcm_loop_info.yn1;
-            yn2 = (int16_t)pb.adpcm_loop_info.yn2;
-          } else {
-            pb.running = 0;
-            break;
+    st.frame = nib;
+    st.pos = afrac;
+    st.cur = cur;
+    st.yn1 = yn1;
+    st.yn2 = yn2;
+    st.ps = ps;
+    addr = nib;
+
+    if (std::getenv("NWII_SNDLOG")) {
+      static std::unordered_map<uint32_t, int> shown;
+      if (!shown.count(cur_pb_)) {
+        shown[cur_pb_] = 1;
+        std::printf("[ADPCM] pb=%08X nib=%08X byte=%08X mean_delta=%lld peak=%d\n",
+                    cur_pb_, addr, byte_addr(addr),
+                    (long long)(metric_diff / (count - 1)), metric_peak);
+      }
+    }
+  } else {
+    if (const char *dp = std::getenv("NWII_AXDUMP")) {
+      static std::unordered_map<uint32_t, int> done;
+      if (!done.count(cur_pb_) && end > addr) {
+        const uint32_t base = loop && loop < end ? loop : addr;
+        uint32_t len = end - base + 2;
+        if (len > 0x40000)
+          len = 0x40000;
+        bool nz = false;
+        for (uint32_t o = 0; o < len && !nz; o += 0x200)
+          if (rd16(base + o))
+            nz = true;
+        if (nz) {
+          done[cur_pb_] = 1;
+          char path[512];
+          std::snprintf(path, sizeof(path), "%s_%08X.raw", dp, cur_pb_);
+          if (FILE *f = std::fopen(path, "wb")) {
+            for (uint32_t o = 0; o < len; ++o)
+              std::fputc(rd8(base + o), f);
+            std::fclose(f);
+            std::printf("[AXDUMPPCM] pb=%08X fmt=%u base=%08X len=%u "
+                        "ratio=%08X vol=%u ml=%u mr=%u -> %s\n",
+                        cur_pb_, fmt, base, len, ratio,
+                        (unsigned)pb.vol_env.cur_volume,
+                        (unsigned)pb.mixer.main_left.volume,
+                        (unsigned)pb.mixer.main_right.volume, path);
           }
         }
       }
     }
-
-    addr = frame;
-    frac = pos;
-    st.frame = frame;
-    st.pos = pos;
-    st.next_idx = next_idx;
-    st.cur = cur;
-    st.yn1 = yn1;
-    st.yn2 = yn2;
-  } else {
+    if (std::getenv("NWII_SNDLOG")) {
+      static std::unordered_map<uint32_t, int> shown;
+      if (shown.size() < 8 && !shown.count(cur_pb_)) {
+        shown[cur_pb_] = 1;
+        int32_t pv = 0, ps = 0;
+        int64_t db = 0, ds = 0;
+        int pk = 0;
+        std::printf("[PCM] pb=%08X fmt=%u addr=%08X be:", cur_pb_, fmt, addr);
+        for (int k = 0; k < 12; ++k) {
+          const int16_t v = (int16_t)rd16(addr + (uint32_t)k * 2);
+          std::printf(" %d", v);
+          if (k) db += std::abs((int)v - pv);
+          pv = v;
+        }
+        std::printf(" swap:");
+        for (int k = 0; k < 12; ++k) {
+          const int16_t v =
+              (int16_t)bswap16(rd16(addr + (uint32_t)k * 2));
+          std::printf(" %d", v);
+          if (k) ds += std::abs((int)v - ps);
+          ps = v;
+          pk = std::max(pk, std::abs((int)v));
+        }
+        std::printf(" mean_delta_be=%lld swap=%lld peak_swap=%d\n",
+                    (long long)(db / 11), (long long)(ds / 11), pk);
+      }
+    }
     const uint32_t bytes = (fmt == 10) ? 2 : (fmt == 25) ? 1 : 0;
     if (bytes == 0) {
       static bool warned = false;
@@ -537,7 +673,9 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
 
   }
 
-  if (word_addr && addr >= 0x90000000u && addr < 0x94000000u)
+  if (mem1_addr)
+    addr = 0x20000000u | (addr & 0x00FFFFFFu);
+  else if (word_addr && addr >= 0x90000000u && addr < 0x94000000u)
     addr = (addr - 0x90000000u + 0x10000000u) / 2;
   pb.audio_addr.cur_addr_hi = (uint16_t)(addr >> 16);
   pb.audio_addr.cur_addr_lo = (uint16_t)addr;
@@ -550,6 +688,15 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
 }
 
 void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
+  if (std::getenv("NWII_SNDLOG")) {
+    static uint32_t last = 0;
+    static int n = 0;
+    if (lr_addr != last && n++ < 20) {
+      std::printf("[AXOUT] lr=%08X vol=%u first=%d,%d\n", lr_addr, volume,
+                  (int)main_l_[0], (int)main_r_[0]);
+      last = lr_addr;
+    }
+  }
   // Global volume ramp over the 96 samples.
   float ramp = last_volume_;
   const float step = ((float)volume - (float)last_volume_) / 96.0f;
@@ -593,6 +740,18 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
       wr16(lr_addr + (uint32_t)i * 4 + 2, (uint16_t)l);
     }
   }
+  if (lr_addr && std::getenv("NWII_SNDLOG")) {
+    static int last_peak = -1, shown = 0;
+    int peak = 0;
+    for (int i = 0; i < 96; ++i) {
+      peak = std::max(peak, std::abs((int)(int16_t)rd16(lr_addr + i * 4)));
+      peak = std::max(peak, std::abs((int)(int16_t)rd16(lr_addr + i * 4 + 2)));
+    }
+    if (peak != last_peak && shown++ < 20) {
+      std::printf("[AXOUT] wrote lr=%08X readback_peak=%d\n", lr_addr, peak);
+      last_peak = peak;
+    }
+  }
 
   // AX ucode signals frame completion with DSP_SYNC (0xDCD10004).
   // Completion mail. DSP_SYNC (4) is what the real AX ucode sends; the value
@@ -600,7 +759,9 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
   // is sensitive to it.
   static const uint16_t sync_mail = []() {
     const char *e = std::getenv("NWII_AXSYNC");
-    return e ? (uint16_t)std::strtoul(e, nullptr, 16) : (uint16_t)0x0002;
+    // YIELD keeps the guest AX library iterating; with DONE it goes quiet
+    // after the first buffer (~1 s instead of ~9 s of menu music).
+    return e ? (uint16_t)std::strtoul(e, nullptr, 16) : (uint16_t)0x0001;
   }();
   push_mail(sync_mail);
 }

@@ -89,7 +89,8 @@ size_t dsp_audio_pull(int16_t* out, size_t frames) {
     adma_ring.erase(adma_ring.begin(), adma_ring.begin() + n * 2);
     if (n < frames)
         std::memset(out + n * 2, 0, (frames - n) * 2 * sizeof(int16_t));
-    static const bool s_audiodbg = std::getenv("NWII_AXTONE") != nullptr;
+    static const bool s_audiodbg =
+        std::getenv("NWII_AXTONE") != nullptr || std::getenv("NWII_SNDLOG") != nullptr;
     if (s_audiodbg) {
         static int32_t peak = 0;
         static uint64_t total = 0;
@@ -98,7 +99,7 @@ size_t dsp_audio_pull(int16_t* out, size_t frames) {
         total += n;
         if (total >= 32000) {
             std::cout << "[Audio] pulled " << total << " frames, peak=" << peak
-                      << std::endl;
+                      << " ring=" << adma_ring.size() << std::endl;
             total = 0;
             peak = 0;
         }
@@ -111,6 +112,22 @@ static void adma_event_cb(CPUContext& ctx, uint64_t late) {
         return;
     uint32_t blocks = adma_control & 0x7FFF;
     uint32_t bytes = blocks * 32;
+    if (std::getenv("NWII_SNDLOG")) {
+        static int last_peak = -1, n = 0;
+        int peak = 0;
+        for (uint32_t o = 0; o + 3 < bytes; o += 2)
+            peak = std::max(peak, std::abs((int)(int16_t)g_mmu->read16((adma_addr | 0x80000000) + o)));
+        static auto t0 = std::chrono::steady_clock::now();
+        static int sec_peak = 0;
+        sec_peak = std::max(sec_peak, peak);
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count() >= 1000) {
+            std::printf("[ADMA] sec peak=%d ring=%zu addr=%08X\n", sec_peak,
+                        adma_ring.size(), adma_addr);
+            sec_peak = 0;
+            t0 = now;
+        }
+    }
     if (g_mmu && bytes > 0) {
         std::lock_guard<std::mutex> lock(adma_mutex);
         
