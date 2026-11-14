@@ -29,9 +29,7 @@ static uint32_t ar_cnt = 0;
 
 
 
-// Mask bits that pair with the interrupt cause bits: AIINTMASK(0x04),
-// ARINTMASK(0x10), DSPINTMASK(0x40). The pending test is
-// (csr >> 1) & csr & these, as in Dolphin's UDSPControl handling.
+// DSP interrupt status bits (AI 0x08, ARAM 0x20, DSP 0x80).
 static constexpr uint16_t CSR_INT_BITS = 0x00A8;
 static uint16_t dsp_control = 0x0800; 
 static uint16_t ar_size = 0;    
