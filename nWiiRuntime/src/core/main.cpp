@@ -565,6 +565,66 @@ int main(int argc, char **argv) {
 
   std::thread cpu_thread(cpu_thread_func, ctx.get());
 
+  // NWII_BOOTWATCH: if the guest has not submitted a single draw a few seconds
+  // after boot, log what is keeping the interrupt/callback path idle. Used to
+  // chase the intermittent black-screen boot stall.
+  auto boot_watchdog = [&ctx]() {
+    // Always record to a file while the guest has not drawn anything, so a
+    // rare black-screen boot leaves evidence. Console output is opt-in.
+    static const bool console = std::getenv("NWII_BOOTWATCH") != nullptr;
+    extern uint64_t g_stat_draws;
+    if (g_stat_draws > 0) return;
+    static auto t0 = std::chrono::steady_clock::now();
+    static auto last = t0;
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() < 1000)
+      return;
+    last = now;
+    const double secs =
+        std::chrono::duration<double>(now - t0).count();
+    char line[512];
+    std::snprintf(line, sizeof(line),
+                  "[BOOTWATCH] t=%lds pc=0x%08X lr=0x%08X in_cb=%d saved=0x%08X "
+                  "pend_cb=%u intsr=0x%08X intmr=0x%08X cur=0x%08X msr=0x%08X",
+                  (long)secs, ctx->pc, ctx->lr, (int)ctx->in_callback,
+                  ctx->dispatch_saved_ctx,
+                  (unsigned)ctx->pending_cb_count.load(std::memory_order_relaxed),
+                  nwii::runtime::hw::pi_intsr.load(std::memory_order_relaxed),
+                  nwii::runtime::hw::pi_intmr.load(std::memory_order_relaxed),
+                  ctx->mmu.read32(0x800000E4), ctx->msr);
+    static FILE *f = std::fopen("/tmp/nwii_bootwatch.log", "w");
+    if (f) { std::fprintf(f, "%s\n", line); std::fflush(f); }
+    if (console) std::cout << line << "\n";
+
+    // Dump the guest thread list so a stall shows which queues are waiting.
+    uint32_t cur = ctx->mmu.read32(0x800000E4);
+    uint32_t th = ctx->mmu.read32(0x800000DC);
+    int guard = 0;
+    while (th != 0 && guard++ < 24) {
+      const uint16_t state = ctx->mmu.read16(th + 0x2C8);
+      const uint32_t prio = ctx->mmu.read32(th + 0x2D0);
+      const uint32_t wq = ctx->mmu.read32(th + 0x2DC);
+      const uint32_t srr0 = ctx->mmu.read32(th + 0x198);
+      char tl[256];
+      std::snprintf(tl, sizeof(tl),
+                    "  th=0x%08X%s state=%u prio=%u waitq=0x%08X srr0=0x%08X",
+                    th, th == cur ? "*" : " ", state, prio, wq, srr0);
+      if (f) { std::fprintf(f, "%s\n", tl); std::fflush(f); }
+      if (console) std::cout << tl << "\n";
+      if (wq >= 0x80000000u && wq < 0x94000000u) {
+        char ql[256];
+        int off = 0;
+        off += std::snprintf(ql + off, sizeof(ql) - off, "    wq[0..7]:");
+        for (int i = 0; i < 8 && off < (int)sizeof(ql) - 12; ++i)
+          off += std::snprintf(ql + off, sizeof(ql) - off, " %08X",
+                               ctx->mmu.read32(wq + i * 4));
+        if (f) { std::fprintf(f, "%s\n", ql); std::fflush(f); }
+        if (console) std::cout << ql << "\n";
+      }
+      th = ctx->mmu.read32(th + 0x2FC);
+    }
+  };
+
   // NWII_MEMDUMP_TRIGGER=<hex>: when the 32-bit word at that guest address
   // becomes non-zero, dump both memory banks ("<prefix>.a.*"), then dump them
   // again 45 vblanks later ("<prefix>.b.*"). Diffing the two dumps shows which
@@ -650,6 +710,7 @@ int main(int argc, char **argv) {
         }
       }
       ctx->vblank_pending = true;
+      boot_watchdog();
       {
         // Titles that link WPAD/KPAD statically poll the guest WPADChannel
         // object; drive it every frame from the host input.
@@ -1045,6 +1106,7 @@ int main(int argc, char **argv) {
       }
       
       ctx->vblank_pending = true;
+      boot_watchdog();
       {
         // Titles that link WPAD/KPAD statically poll the guest WPADChannel
         // object; drive it every frame from the host input.
