@@ -22,7 +22,7 @@ inline void clear_pi_interrupt(uint32_t mask) {
   pi_intsr.fetch_and(~mask, std::memory_order_relaxed);
 }
 
-void vi_trigger_interrupt();
+void vi_trigger_interrupt(bool force = false);
 void ipc_post_reply(uint32_t req_addr); 
 void ipc_tick();
 void ai_update();

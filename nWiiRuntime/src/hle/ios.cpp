@@ -12,6 +12,7 @@
 #include <vector>
 #include <thread>
 #include "runtime/hw/hw.h"
+#include <chrono>
 #include "runtime/event_scheduler.h"
 #include "runtime/os_thread.h"
 #include "runtime/virtual_disc.h"
@@ -1077,6 +1078,28 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.vblank_pending = false;
       nwii::runtime::hw::vi_trigger_interrupt();
       hle_drive_thread_queue(ctx);
+  }
+
+  // VI must run at the field rate (~59.94 Hz), independent of how fast the
+  // host can render. The main loop used to be the only vblank source, so on
+  // heavy scenes the guest received VI at the render rate (~40 Hz) and every
+  // frame-based timer (game clock, animation) ran slow. Drive it from the
+  // wall clock here, in the CPU thread's poll path.
+  {
+      static auto next_vi = std::chrono::steady_clock::now();
+      static const bool s_wallvi =
+          std::getenv("NWII_WALLVI") != nullptr || true;
+      if (s_wallvi) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= next_vi) {
+              next_vi = now + std::chrono::microseconds(16683);
+              if ((nwii::runtime::hw::pi_intmr.load() & 0x00000100) &&
+                  !ctx.in_callback) {
+                  nwii::runtime::hw::vi_trigger_interrupt(true);
+                  hle_drive_thread_queue(ctx);
+              }
+          }
+      }
   }
 
   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {

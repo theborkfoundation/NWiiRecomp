@@ -29,24 +29,37 @@ static void vi_update_interrupt() {
     clear_pi_interrupt(0x00000100);
 }
 
-void vi_trigger_interrupt() {
+void vi_trigger_interrupt(bool force) {
     // The VI fires once per field (~59.94 Hz). Several HLE paths can request a
     // retrace (VIWaitForRetrace, vblank callbacks, DSP mailboxes); without a
     // gate the guest sees 1.5-2x more retraces than frames are presented, so
     // every frame-based timer in the game runs fast. Coalesce to one per field.
     static const bool s_nogate =
         std::getenv("NWII_NO_VI_GATE") != nullptr;
+    static auto next = std::chrono::steady_clock::now();
     if (!s_nogate) {
-        static auto next = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
-        if (now < next) return;
+        if (!force) {
+            if (now < next) return;
+        }
+        // Forced (wall-clock) ticks also move the gate, so render-loop vblank
+        // calls cannot add extra fields between them.
         next = now + std::chrono::microseconds(16683);
     }
     ++g_vi_trigger_count;
     static const bool s_vitrace = (std::getenv("NWII_VITRACE") != nullptr);
     if (s_vitrace) {
         static int n = 0;
-        if (n++ < 40) std::cout << "[VItrig] #" << std::dec << n << "\n";
+        static auto last = std::chrono::steady_clock::now();
+        static int per_sec = 0;
+        ++per_sec;
+        const auto now2 = std::chrono::steady_clock::now();
+        if (now2 - last >= std::chrono::seconds(1)) {
+            std::cout << "[VItrig] " << per_sec << "/s\n";
+            per_sec = 0;
+            last = now2;
+        }
+        if (n++ < 3) std::cout << "[VItrig] first #" << std::dec << n << "\n";
     }
 
     vi_di[0] |= 0x80000000;
