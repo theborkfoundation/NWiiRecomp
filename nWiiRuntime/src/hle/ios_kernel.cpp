@@ -72,7 +72,11 @@ int32_t IOSKernel::read(CPUContext& ctx, uint32_t fd, uint32_t buf, uint32_t len
 
 int32_t IOSKernel::write(CPUContext& ctx, uint32_t fd, uint32_t buf, uint32_t len) {
     FdEntry* e = get_entry(fd);
-    if (!e) return IPC_EINVAL;
+    if (!e) {
+        if (std::getenv("NWII_DEBUG"))
+            std::cout << "[IOS] write to unknown fd=" << fd << " len=" << len << std::endl;
+        return IPC_EINVAL;
+    }
     return e->device->write(ctx, e->internal_fd, buf, len);
 }
 
@@ -85,13 +89,17 @@ int32_t IOSKernel::seek(CPUContext& ctx, uint32_t fd, int32_t offset, int32_t wh
 int32_t IOSKernel::ioctl(CPUContext& ctx, const IpcRequest& req) {
     FdEntry* e = get_entry(req.fd);
     if (!e) return IPC_EINVAL;
-    return e->device->ioctl(ctx, req);
+    IpcRequest r = req;
+    r.fd = e->internal_fd;
+    return e->device->ioctl(ctx, r);
 }
 
 int32_t IOSKernel::ioctlv(CPUContext& ctx, const IpcRequest& req) {
     FdEntry* e = get_entry(req.fd);
     if (!e) return IPC_EINVAL;
-    return e->device->ioctlv(ctx, req);
+    IpcRequest r = req;
+    r.fd = e->internal_fd;
+    return e->device->ioctlv(ctx, r);
 }
 
 } 

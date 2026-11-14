@@ -4,6 +4,10 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <cstdlib>
+#include "runtime/config.h"
 
 namespace nwii::runtime::devices {
 
@@ -121,13 +125,91 @@ static std::vector<uint8_t> make_setting_txt() {
     return std::vector<uint8_t>(txt, txt + strlen(txt));
 }
 
-static void vnand_init() {
+static static std::string host_save_dir();
+
+void vnand_init() {
     if (g_vnand_init) return;
     g_vnand_init = true;
     g_vnand_files.push_back({"/shared2/sys/SYSCONF", make_sysconf()});
     g_vnand_files.push_back({"/title/00000001/00000002/data/setting.txt", make_setting_txt()});
     g_vnand_files.push_back({"/title/00000001/00000002/data/play_rec.dat", std::vector<uint8_t>(0x20, 0)});
     g_vnand_files.push_back({"/shared2/test2/dvderror.dat", std::vector<uint8_t>(4, 0)});
+
+    // The game saves to /title/00010000/<low title id>/data/slot_N.sav. Create
+    // the host-backed directory up front so ISFS_GetAttr sees the title data
+    // directory and the game does not fall back to /tmp + root staging.
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(host_save_dir()) /
+            "title/00010000/534f4a45/data",
+        ec);
+}
+
+// Host-backed files for writable guest paths (/tmp/slot_N.sav etc.). The
+// synthetic NAND above stays read-only; anything under /tmp is persisted to
+// ~/.nwii/saves/<gameid>/... so saves survive a relaunch.
+static constexpr int HOST_FD_BASE = 40;
+static constexpr int HOST_FD_MAX = 8;
+struct HostHandle {
+    FILE *f = nullptr;
+    std::string path;
+    bool open = false;
+};
+static HostHandle g_host_handles[HOST_FD_MAX];
+
+static std::string host_save_dir() {
+    std::string root;
+    if (const char *e = std::getenv("NWII_NAND_DIR"))
+        root = e;
+    else {
+        const char *home = std::getenv("HOME");
+        root = std::string(home ? home : ".") + "/.nwii/saves/" +
+               nwii::runtime::Config::get().game_id;
+    }
+    return root;
+}
+
+static std::string host_path_for(const std::string &guest) {
+    std::string rel = guest;
+    while (!rel.empty() && rel.front() == '/')
+        rel.erase(rel.begin());
+    // Refuse path traversal.
+    if (rel.find("..") != std::string::npos)
+        return {};
+    return host_save_dir() + "/" + rel;
+}
+
+static std::string guest_path_at(CPUContext &ctx, uint32_t addr, int maxlen = 64) {
+    std::string out;
+    for (int i = 0; i < maxlen; ++i) {
+        char c = (char)ctx.mmu.read8(addr + (uint32_t)i);
+        if (!c) break;
+        out.push_back(c);
+    }
+    return out;
+}
+
+static bool synthetic_exists(const std::string &path) {
+    for (const auto &f : g_vnand_files)
+        if (f.path == path) return true;
+    return false;
+}
+
+static bool create_host_file(const std::string &guest, bool truncate) {
+    const std::string hp = host_path_for(guest);
+    if (hp.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(hp).parent_path(), ec);
+    if (truncate) {
+        FILE *f = std::fopen(hp.c_str(), "wb");
+        if (!f) return false;
+        std::fclose(f);
+        return true;
+    }
+    FILE *f = std::fopen(hp.c_str(), "ab");
+    if (!f) return false;
+    std::fclose(f);
+    return true;
 }
 
 static constexpr int VNAND_FD_BASE = 20;
@@ -152,6 +234,9 @@ public:
                 for (int s = 0; s < VNAND_FD_MAX; ++s) {
                     if (!g_vnand_handles[s].open) {
                         g_vnand_handles[s] = {i, 0, true};
+                        if (std::getenv("NWII_DEBUG"))
+                            std::cout << "[FS] vnand open " << path
+                                      << " fd=" << (VNAND_FD_BASE + s) << std::endl;
                         return VNAND_FD_BASE + s;
                     }
                 }
@@ -160,7 +245,54 @@ public:
         }
         if (path == "/dev/fs")
             return IPC_OK; 
-        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] open: no such file " << path << std::endl;
+
+        // Host-backed /tmp files (save slots). Reads of a missing file create
+        // an empty one so the game sees a valid, empty slot; later writes
+        // persist directly to the host.
+        if (path.rfind("/tmp/", 0) == 0) {
+            const std::string hp = host_path_for(path);
+            if (!hp.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(
+                    std::filesystem::path(hp).parent_path(), ec);
+                for (int s = 0; s < HOST_FD_MAX; ++s) {
+                    if (!g_host_handles[s].open) {
+                        FILE *f = std::fopen(hp.c_str(), "r+b");
+                        if (!f)
+                            f = std::fopen(hp.c_str(), "w+b");
+                        if (!f) break;
+                        g_host_handles[s] = {f, path, true};
+                        if (std::getenv("NWII_DEBUG"))
+                            std::cout << "[FS] host open " << path << " -> "
+                                      << hp << " fd=" << (HOST_FD_BASE + s)
+                                      << std::endl;
+                        return HOST_FD_BASE + s;
+                    }
+                }
+            }
+        }
+
+        // Host-backed non-synthetic paths (e.g. /title/.../data/state.dat)
+        // once ISFS_CreateFile has created them.
+        {
+            const std::string hp = host_path_for(path);
+            if (!hp.empty() && std::filesystem::exists(hp)) {
+                for (int s = 0; s < HOST_FD_MAX; ++s) {
+                    if (!g_host_handles[s].open) {
+                        FILE *f = std::fopen(hp.c_str(), "r+b");
+                        if (!f) break;
+                        g_host_handles[s] = {f, path, true};
+                        if (std::getenv("NWII_DEBUG"))
+                            std::cout << "[FS] host open " << path << " -> " << hp
+                                      << " fd=" << (HOST_FD_BASE + s) << std::endl;
+                        return HOST_FD_BASE + s;
+                    }
+                }
+            }
+        }
+
+        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] open: no such file " << path
+                                                << " mode=0x" << std::hex << mode << std::dec << std::endl;
         return IPC_ENOENT; 
     }
     
@@ -168,6 +300,13 @@ public:
         int slot = fd - VNAND_FD_BASE;
         if (slot >= 0 && slot < VNAND_FD_MAX && g_vnand_handles[slot].open) {
             g_vnand_handles[slot].open = false;
+            return IPC_OK;
+        }
+        int hs = (int)fd - HOST_FD_BASE;
+        if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
+            std::fflush(g_host_handles[hs].f);
+            std::fclose(g_host_handles[hs].f);
+            g_host_handles[hs] = {};
             return IPC_OK;
         }
         return IPC_OK;
@@ -193,10 +332,25 @@ public:
             h.pos += to_read;
             return to_read;
         }
+        int hs = (int)fd - HOST_FD_BASE;
+        if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
+            auto &hh = g_host_handles[hs];
+            std::vector<uint8_t> tmp(len);
+            const size_t got = std::fread(tmp.data(), 1, len, hh.f);
+            uint32_t virt_ptr = buf;
+            if (virt_ptr < 0x01800000 || (virt_ptr >= 0x10000000 && virt_ptr < 0x14000000))
+                virt_ptr |= 0x80000000;
+            if (virt_ptr >= 0x80000000 && virt_ptr < 0x94000000)
+                for (size_t i = 0; i < got; ++i)
+                    ctx.mmu.write8(virt_ptr + (uint32_t)i, tmp[i]);
+            return (int32_t)got;
+        }
         return 0; 
     }
     
     int32_t write(CPUContext& ctx, uint32_t fd, uint32_t buf, uint32_t len) override {
+        if (std::getenv("NWII_DEBUG"))
+            std::cout << "[FS] write fd=" << fd << " len=" << len << std::endl;
         int slot = fd - VNAND_FD_BASE;
         if (slot >= 0 && slot < VNAND_FD_MAX && g_vnand_handles[slot].open) {
             auto& h = g_vnand_handles[slot];
@@ -216,6 +370,24 @@ public:
             h.pos += len;
             return len;
         }
+        int hs = (int)fd - HOST_FD_BASE;
+        if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
+            auto &hh = g_host_handles[hs];
+            uint32_t virt_ptr = buf;
+            if (virt_ptr < 0x01800000 || (virt_ptr >= 0x10000000 && virt_ptr < 0x14000000))
+                virt_ptr |= 0x80000000;
+            std::vector<uint8_t> tmp(len);
+            if (virt_ptr >= 0x80000000 && virt_ptr < 0x94000000)
+                for (uint32_t i = 0; i < len; ++i)
+                    tmp[i] = ctx.mmu.read8(virt_ptr + i);
+            const long off = std::ftell(hh.f);
+            const size_t put = std::fwrite(tmp.data(), 1, len, hh.f);
+            std::fflush(hh.f);
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] host write " << hh.path << " off=" << off
+                          << " len=" << len << std::endl;
+            return (int32_t)put;
+        }
         return 0;
     }
 
@@ -229,11 +401,92 @@ public:
             else if (whence == 2) h.pos = f.data.size() + offset; 
             return h.pos;
         }
+        int hs = (int)fd - HOST_FD_BASE;
+        if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
+            int whence_f = (whence == 0) ? SEEK_SET : (whence == 1) ? SEEK_CUR : SEEK_END;
+            std::fseek(g_host_handles[hs].f, offset, whence_f);
+            return (int32_t)std::ftell(g_host_handles[hs].f);
+        }
         return IPC_OK;
     }
 
     int32_t ioctl(CPUContext& ctx, const IpcRequest& req) override {
-        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] ioctl fd=" << req.fd << " cmd=0x" << std::hex << req.ioctl_cmd << std::dec << std::endl;
+        if (std::getenv("NWII_DEBUG")) std::cout << "[FS] ioctl fd=" << req.fd << " cmd=0x" << std::hex << req.ioctl_cmd
+                  << std::dec << " in=" << req.in_buf << "/" << req.in_size
+                  << " out=" << req.out_buf << "/" << req.out_size << std::endl;
+        if (req.ioctl_cmd == 0x03) { // CreateDir (owner/group + 0x40 name + perms)
+            std::string path = guest_path_at(ctx, req.in_buf + 6);
+            const std::string hp = host_path_for(path);
+            if (!hp.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(hp, ec);
+            }
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] CreateDir " << path << std::endl;
+            return IPC_OK;
+        }
+        if (req.ioctl_cmd == 0x06) { // GetAttr
+            std::string path = guest_path_at(ctx, req.in_buf);
+            bool ok = synthetic_exists(path) || (!host_path_for(path).empty() &&
+                                                std::filesystem::exists(host_path_for(path)));
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] GetAttr " << path << " -> " << (ok ? "OK" : "ENOENT") << std::endl;
+            return ok ? IPC_OK : IPC_ENOENT;
+        }
+        if (req.ioctl_cmd == 0x07) { // Delete
+            std::string path = guest_path_at(ctx, req.in_buf);
+            const std::string hp = host_path_for(path);
+            if (!hp.empty()) { std::error_code ec; std::filesystem::remove(hp, ec); }
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] Delete " << path << std::endl;
+            return IPC_OK;
+        }
+        if (req.ioctl_cmd == 0x08) { // Rename
+            std::string a = guest_path_at(ctx, req.in_buf);
+            std::string b = guest_path_at(ctx, req.in_buf + 64);
+            const std::string ha = host_path_for(a), hb = host_path_for(b);
+            if (!ha.empty() && !hb.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(std::filesystem::path(hb).parent_path(), ec);
+                std::filesystem::rename(ha, hb, ec);
+            }
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] Rename " << a << " -> " << b << std::endl;
+            return IPC_OK;
+        }
+        if (req.ioctl_cmd == 0x09) { // CreateFile
+            std::string path = guest_path_at(ctx, req.in_buf + 6);
+            bool ok = create_host_file(path, false);
+            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] CreateFile " << path << " -> " << (ok ? "OK" : "FAIL") << std::endl;
+            return ok ? IPC_OK : IPC_ENOENT;
+        }
+        if (req.ioctl_cmd == 0x0B) { // GetFileStats (size, seek)
+            uint32_t size = 0, pos = 0;
+            bool found = false;
+            int hs = (int)req.fd - HOST_FD_BASE;
+            if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
+                FILE *f = g_host_handles[hs].f;
+                long cur = std::ftell(f);
+                std::fseek(f, 0, SEEK_END);
+                size = (uint32_t)std::ftell(f);
+                std::fseek(f, cur, SEEK_SET);
+                pos = (uint32_t)cur;
+                found = true;
+            }
+            int vs = (int)req.fd - VNAND_FD_BASE;
+            if (!found && vs >= 0 && vs < VNAND_FD_MAX && g_vnand_handles[vs].open) {
+                auto &h = g_vnand_handles[vs];
+                size = (uint32_t)g_vnand_files[h.file_idx].data.size();
+                pos = h.pos;
+                found = true;
+            }
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] GetFileStats fd=" << req.fd
+                          << " out=" << req.out_buf << "/" << req.out_size
+                          << " found=" << found << " size=" << size
+                          << " pos=" << pos << std::endl;
+            if (found && req.out_buf && req.out_size >= 8) {
+                ctx.mmu.write32(req.out_buf + 0, size);
+                ctx.mmu.write32(req.out_buf + 4, pos);
+            }
+            return IPC_OK;
+        }
         if (req.ioctl_cmd == 0x02) { // ISFS_IOCTL_GETSTATS
             if (req.out_buf && req.out_size >= 28) {
                 ctx.mmu.write32(req.out_buf + 0, 16384);  // Cluster size (16KB)
