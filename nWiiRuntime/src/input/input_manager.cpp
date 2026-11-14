@@ -46,6 +46,7 @@ void InputManager::update() {
 
         wii_motes[i].buttons = 0;
         wii_motes[i].err = -1; 
+        wii_motes[i].classic = {};
     }
 
     for (auto& source : sources) {

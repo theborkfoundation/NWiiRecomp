@@ -12,12 +12,22 @@ struct GameCubePadState {
     int8_t err;
 };
 
+// Classic Controller extension state (WPAD_CL_* button bits).
+struct ClassicPadState {
+    uint16_t buttons;
+    float lx, ly;      // left stick, -1..1
+    float rx, ry;      // right stick, -1..1
+    float lt, rt;      // analog triggers, 0..1
+    bool connected;
+};
+
 struct WiimoteState {
     uint32_t buttons;
     float ir_x, ir_y; 
     float accel_x, accel_y, accel_z;
     float gyro_pitch, gyro_yaw, gyro_roll;
     int8_t err;
+    ClassicPadState classic;
 };
 
 class IInputSource {

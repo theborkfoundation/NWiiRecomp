@@ -1,7 +1,9 @@
 #include "runtime/cpu_context.h"
 #include "input/input_manager.h"
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 using namespace nwii::runtime;
@@ -110,9 +112,13 @@ void rvl_feed_input(CPUContext &ctx) {
     if (force_a && ((feed_frames / 20) & 1) == 0)
         buttons |= 0x0800u; // KPAD_BUTTON_A
 
-    // Connection state: WPAD_ERR_NONE, dev type core, connected.
+    // Connection state: WPAD_ERR_NONE, dev type core (or classic), connected.
+    static const bool classic_mode = []() {
+        const char *e = std::getenv("NWII_INPUT");
+        return e && std::string(e) == "classic";
+    }();
     ctx.mmu.write32(ch0 + 2304, 0);
-    ctx.mmu.write8(ch0 + 2309, 0);
+    ctx.mmu.write8(ch0 + 2309, classic_mode ? 2 : 0);
     ctx.mmu.write32(ch0 + 2336, 1);
     ctx.mmu.write32(ch0 + 2300, 42);
 
@@ -243,6 +249,44 @@ void hle_kpad_read_ex(CPUContext& ctx) {
         // Fill remaining fields (acceleration, pointer, etc.)
         for (uint32_t b = 0x0C; b < 240; b += 4) {
             ctx.mmu.write32(data_array_ptr + b, 0);
+        }
+
+        // Classic Controller mode: report a WPAD_DEV_CLASSIC device with the
+        // extension block filled. KPADStatus offsets follow the SDK header:
+        // hold/trig/release 0x00/0x04/0x08, dev_type 0x5C, ex_status 0x60
+        // (cl.hold/trig/release, lstick, rstick, ltrigger, rtrigger).
+        static const bool classic_mode = []() {
+            const char *e = std::getenv("NWII_INPUT");
+            return e && std::string(e) == "classic";
+        }();
+        if (classic_mode) {
+            const ClassicPadState &cl = state.classic;
+            static uint32_t prev_cl = 0;
+            const uint32_t chold = cl.buttons;
+            const uint32_t ctrig = chold & ~prev_cl;
+            const uint32_t crel = ~chold & prev_cl;
+            prev_cl = chold;
+
+            // Keep the core buttons valid too: many games read them for menus
+            // even when the classic extension is present.
+            ctx.mmu.write8(data_array_ptr + 0x5C, 2);  // WPAD_DEV_CLASSIC
+            ctx.mmu.write8(data_array_ptr + 0x5D, 0);  // wpad_err
+            ctx.mmu.write8(data_array_ptr + 0x5E, 0);  // dpd_valid_fg
+            ctx.mmu.write8(data_array_ptr + 0x5F, 6);  // WPAD_FMT_CLASSIC
+            ctx.mmu.write32(data_array_ptr + 0x60, chold);
+            ctx.mmu.write32(data_array_ptr + 0x64, ctrig);
+            ctx.mmu.write32(data_array_ptr + 0x68, crel);
+            auto wf = [&](uint32_t off, float v) {
+                uint32_t u;
+                std::memcpy(&u, &v, 4);
+                ctx.mmu.write32(data_array_ptr + off, u);
+            };
+            wf(0x6C, cl.lx);
+            wf(0x70, cl.ly);
+            wf(0x74, cl.rx);
+            wf(0x78, cl.ry);
+            wf(0x7C, cl.lt);
+            wf(0x80, cl.rt);
         }
 
         if (ch0 >= 0x80000000 && ch0 < 0x81800000) {

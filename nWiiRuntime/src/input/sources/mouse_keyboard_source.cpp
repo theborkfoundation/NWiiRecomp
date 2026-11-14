@@ -93,6 +93,38 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
             if (k_down)  motes[0].buttons |= 0x0400; // WPAD_BUTTON_DOWN
         }
 
+        // Classic Controller extension (used when NWII_INPUT=classic):
+        {
+            ClassicPadState &cl = motes[0].classic;
+            cl = {};
+            cl.connected = true;
+            if (keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_RETURN] ||
+                keys[SDL_SCANCODE_KP_ENTER] || keys[SDL_SCANCODE_K] ||
+                keys[SDL_SCANCODE_2] || keys[SDL_SCANCODE_X] ||
+                (mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT)))
+                cl.buttons |= 0x0010;  // A
+            if (keys[SDL_SCANCODE_J] || keys[SDL_SCANCODE_1] ||
+                keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_LSHIFT] ||
+                (mouse_state & SDL_BUTTON(SDL_BUTTON_RIGHT)))
+                cl.buttons |= 0x0040;  // B
+            if (keys[SDL_SCANCODE_U]) cl.buttons |= 0x0008;  // X
+            if (keys[SDL_SCANCODE_I]) cl.buttons |= 0x0020;  // Y
+            if (keys[SDL_SCANCODE_Q]) cl.buttons |= 0x2000;  // L
+            if (keys[SDL_SCANCODE_E]) cl.buttons |= 0x0200;  // R
+            if (keys[SDL_SCANCODE_ESCAPE] || keys[SDL_SCANCODE_P] ||
+                keys[SDL_SCANCODE_EQUALS])
+                cl.buttons |= 0x0400;  // +
+            if (keys[SDL_SCANCODE_MINUS] || keys[SDL_SCANCODE_TAB] ||
+                keys[SDL_SCANCODE_BACKSPACE])
+                cl.buttons |= 0x1000;  // -
+            if (k_up)    cl.buttons |= 0x0001;
+            if (k_left)  cl.buttons |= 0x0002;
+            if (k_down)  cl.buttons |= 0x4000;
+            if (k_right) cl.buttons |= 0x8000;
+            cl.lx = k_right ? 1.0f : (k_left ? -1.0f : 0.0f);
+            cl.ly = k_up ? 1.0f : (k_down ? -1.0f : 0.0f);
+        }
+
         // GameCube Pad fallback mapping:
         pads[0].err = 0;
         if (keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_K])  pads[0].buttons |= 0x0100; // A

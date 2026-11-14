@@ -122,6 +122,40 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
             if (d_down)  motes[i].buttons |= 0x0400; // WPAD_BUTTON_DOWN
         }
 
+        // Classic Controller extension (WPAD_CL_* bits):
+        {
+            ClassicPadState &cl = motes[i].classic;
+            cl = {};
+            cl.connected = true;
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) cl.buttons |= 0x0010; // A
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B)) cl.buttons |= 0x0040; // B
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X)) cl.buttons |= 0x0008; // X
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y)) cl.buttons |= 0x0020; // Y
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) cl.buttons |= 0x2000;  // L
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) cl.buttons |= 0x0200; // R
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) cl.buttons |= 0x0400;  // +
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) cl.buttons |= 0x1000;   // -
+            if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) cl.buttons |= 0x0800;  // Home
+            if (d_up)    cl.buttons |= 0x0001;
+            if (d_left)  cl.buttons |= 0x0002;
+            if (d_down)  cl.buttons |= 0x4000;
+            if (d_right) cl.buttons |= 0x8000;
+
+            const int clt = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+            const int crt = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+            if (clt > 8000) cl.buttons |= 0x0080;  // ZL
+            if (crt > 8000) cl.buttons |= 0x0004;  // ZR
+            cl.lt = clt / 32767.0f;
+            cl.rt = crt / 32767.0f;
+
+            const int rx2 = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX);
+            const int ry2 = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY);
+            cl.lx = lx / 32767.0f;
+            cl.ly = -ly / 32767.0f;
+            cl.rx = rx2 / 32767.0f;
+            cl.ry = -ry2 / 32767.0f;
+        }
+
         // GameCube pad state:
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) pads[i].buttons |= 0x0100; 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B)) pads[i].buttons |= 0x0200; 
