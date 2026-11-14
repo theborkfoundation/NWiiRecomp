@@ -1,4 +1,5 @@
 #include "runtime/cpu_context.h"
+#include "runtime/gx_debug.h"
 #include "runtime/diagnostics.h"
 #include "runtime/gx/fifo_parser.h"
 #include "runtime/gx/renderer.h"
@@ -6,12 +7,26 @@
 #include "runtime/gx_state.h"
 #include "runtime/texture_cache_gl.h"
 #include <cstdio>
+#include <unordered_set>
 #include <cstdlib>
 #include <cstring>
 #include <glad/glad.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace nwii::runtime::gxdbg {
+bool no_alpha_test = false;
+bool alpha_view = false;
+bool no_tex = false;
+bool no_blend = false;
+bool skip_blend = false;
+bool only_blend = false;
+int solo_count = 0;
+unsigned skip_tex_addr = 0;
+bool no_cull = false;
+bool no_depth = false;
+} // namespace nwii::runtime::gxdbg
 
 namespace nwii::runtime {
 extern MMU *g_mmu;
@@ -35,6 +50,9 @@ struct GLShader {
   GLint uTevColor;
   GLint uTexOnly;
   GLint uDbgColor;
+  GLint uDbgNoAT;
+  GLint uDbgAlphaView;
+  GLint uDbgNoTex;
   GLint uProjMtx;
   GLint uMatColor, uAmbColor, uChanCtrl;
   GLint uLightCol, uLightPos, uLightDir, uLightCosAtt, uLightDistAtt;
@@ -235,12 +253,29 @@ static bool CurrentIsPerspective() {
 }
 
 static void ApplyZMode() {
-
-  if (CurrentIsPerspective()) {
+  if (nwii::runtime::gxdbg::no_depth) {
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    return;
+  }
+  const auto &z = g_state.zMode;
+  static const GLenum cmp[8] = {GL_NEVER,  GL_LESS,    GL_EQUAL,
+                                 GL_LEQUAL, GL_GREATER, GL_NOTEQUAL,
+                                 GL_GEQUAL, GL_ALWAYS};
+  if (z.enable) {
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
+    glDepthFunc(cmp[z.func & 7]);
   } else {
     glDisable(GL_DEPTH_TEST);
+  }
+  glDepthMask(z.update ? GL_TRUE : GL_FALSE);
+
+  if (std::getenv("NWII_ZDBG")) {
+    static int seen[2][8][2] = {};
+    static int n = 0;
+    if (!seen[z.enable & 1][z.func & 7][z.update & 1]++ && n++ < 40)
+      std::printf("[ZMODE] enable=%d func=%d update=%d\n", z.enable,
+                  z.func, z.update);
   }
 }
 
@@ -250,6 +285,7 @@ static void ApplyZMode() {
 // documented GX->GL factor order (src uses DST_COLOR at index 2/3, dst uses
 // SRC_COLOR).
 static void ApplyBlend() {
+  if (nwii::runtime::gxdbg::no_blend) { glDisable(GL_BLEND); return; }
   uint32_t cm = g_state.bp[0x41];
   bool enable = cm & 1;
   bool subtract = (cm >> 11) & 1;
@@ -287,7 +323,7 @@ static void ApplyBlend() {
 static void ApplyCullMode() {
   static const bool no_cull = std::getenv("NWII_NOCULL") != nullptr;
   const uint8_t m = g_state.cullMode;
-  if (no_cull || m == 0) {
+  if (no_cull || nwii::runtime::gxdbg::no_cull || m == 0) {
     glDisable(GL_CULL_FACE);
     return;
   }
@@ -402,9 +438,103 @@ static void DrawPrimitive(const GXCommand &cmd) {
   if (const char *solo = std::getenv("NWII_SOLO")) {
     if ((int)v.size() != std::atoi(solo)) return;
   }
+  if (nwii::runtime::gxdbg::solo_count &&
+      (int)v.size() != nwii::runtime::gxdbg::solo_count)
+    return;
+  if (nwii::runtime::gxdbg::skip_tex_addr &&
+      g_state.texStages[0].base_addr == nwii::runtime::gxdbg::skip_tex_addr)
+    return;
+  {
+    const bool is_blend = (g_state.bp[0x41] & 1) != 0;
+    if (nwii::runtime::gxdbg::skip_blend && is_blend) return;
+    if (nwii::runtime::gxdbg::only_blend && !is_blend) return;
+  }
   const size_t n = v.size();
   if (n == 0)
     return;
+
+  if (std::getenv("NWII_Q4DBG") && n == 4) {
+    static std::unordered_set<uint64_t> q4seen;
+    float xmn = 1e9f, xmx = -1e9f, ymn = 1e9f, ymx = -1e9f;
+    float ar = 0, ag = 0, ab = 0, aa = 0; int nc = 0;
+    for (const auto &vv : v) {
+      if (vv.has_pos) {
+        xmn = std::fmin(xmn, vv.pos[0]); xmx = std::fmax(xmx, vv.pos[0]);
+        ymn = std::fmin(ymn, vv.pos[1]); ymx = std::fmax(ymx, vv.pos[1]);
+      }
+      if (vv.has_color) { ar += vv.color[0]; ag += vv.color[1]; ab += vv.color[2]; aa += vv.color[3]; ++nc; }
+    }
+    if (nc) { ar/=nc; ag/=nc; ab/=nc; aa/=nc; }
+    const uint64_t key = ((uint64_t)g_state.texStages[0].base_addr << 20) ^
+                         ((uint64_t)g_state.texStages[0].format << 12) ^
+                         ((uint64_t)(int)(xmn*4+2048) << 40) ^
+                         ((uint64_t)(int)(xmx*4+2048) << 32) ^
+                         ((uint64_t)(int)(ymn*4+2048) << 24) ^
+                         ((uint64_t)(int)(ymx*4+2048) << 16) ^
+                         ((uint64_t)g_state.bp[0x41] << 4) ^ (uint64_t)(ar*7)<<52 ^ (uint64_t)(ab*7)<<48;
+    if (q4seen.insert(key).second && q4seen.size() < 200) {
+      static int qi = 0;
+      std::printf("[Q4 #%d] tex=%08X %dx%d fmt=%d cmode=%06X F3=%06X "
+                  "E0..E3=%06X,%06X,%06X,%06X colors=%d avg=%.2f,%.2f,%.2f,%.2f "
+                  "bbox=(%.1f..%.1f, %.1f..%.1f)\n",
+                  qi++, g_state.texStages[0].base_addr,
+                  g_state.texStages[0].width, g_state.texStages[0].height,
+                  g_state.texStages[0].format, g_state.bp[0x41], g_state.bp[0xF3],
+                  g_state.bp[0xE0], g_state.bp[0xE1], g_state.bp[0xE2],
+                  g_state.bp[0xE3], nc, ar, ag, ab, aa, xmn, xmx, ymn, ymx);
+    }
+  }
+
+  // NWII_BLUEDBG: report draws whose vertex colours average strongly blue.
+  // NWII_QUADDBG: report small blended draws (effects/UI candidates).
+  {
+    static const bool bluedbg = std::getenv("NWII_BLUEDBG") != nullptr;
+    static const bool quaddbg = std::getenv("NWII_QUADDBG") != nullptr;
+    if (bluedbg || quaddbg) {
+      float ar = 0, ag = 0, ab = 0, aa = 0;
+      int nc = 0;
+      for (const auto &vv : v) {
+        if (!vv.has_color) continue;
+        ar += vv.color[0]; ag += vv.color[1];
+        ab += vv.color[2]; aa += vv.color[3];
+        ++nc;
+      }
+      if (nc) { ar /= nc; ag /= nc; ab /= nc; aa /= nc; }
+      static int di = 0;
+      static std::unordered_set<uint64_t> seen;
+      const uint64_t key =
+          ((uint64_t)cmd.prim_type << 56) ^ ((uint64_t)n << 40) ^
+          ((uint64_t)g_state.texStages[0].base_addr << 8) ^
+          ((uint64_t)g_state.texStages[0].format << 4) ^
+          ((uint64_t)(ar * 15) << 36) ^ ((uint64_t)(ag * 15) << 32) ^
+          ((uint64_t)(ab * 15) << 28) ^ ((uint64_t)(aa * 15) << 24) ^
+          ((uint64_t)g_state.bp[0x41] << 12);
+      if (bluedbg && nc && ab > 0.55f && ab > ar + 0.2f && ab > ag + 0.2f &&
+          seen.insert(key ^ 0x9E3779B97F4A7C15ull).second) {
+        static int bn = 0;
+        if (bn++ < 400)
+          printf("[BLUE] #%d prim=%02X n=%zu avg=%.2f,%.2f,%.2f,%.2f "
+                 "tex0=%08X %dx%d fmt=%d cmode=%06X F3=%06X C0=%06X C1=%06X\n",
+                 di, cmd.prim_type, n, ar, ag, ab, aa,
+                 g_state.texStages[0].base_addr, g_state.texStages[0].width,
+                 g_state.texStages[0].height, g_state.texStages[0].format,
+                 g_state.bp[0x41], g_state.bp[0xF3], g_state.bp[0xC0],
+                 g_state.bp[0xC1]);
+      }
+      if (quaddbg && n <= 6 && (g_state.bp[0x41] & 1) &&
+          seen.insert(key).second) {
+        static int qn = 0;
+        if (qn++ < 400)
+          printf("[QUAD] #%d prim=%02X n=%zu tex0=%08X %dx%d fmt=%d "
+                 "cmode=%06X F3=%06X colors=%d avg=%.2f,%.2f,%.2f,%.2f\n",
+                 di, cmd.prim_type, n, g_state.texStages[0].base_addr,
+                 g_state.texStages[0].width, g_state.texStages[0].height,
+                 g_state.texStages[0].format, g_state.bp[0x41],
+                 g_state.bp[0xF3], nc, ar, ag, ab, aa);
+      }
+      ++di;
+    }
+  }
 
   static const bool s_drawlog = std::getenv("NWII_DRAWLOG") != nullptr;
   if (s_drawlog) {
@@ -504,6 +634,9 @@ static void SetupDrawState(const GXCommand &cmd) {
     sh.uTevColor = sh.uTevKColor = -1;
     sh.uTexOnly = -1;
     sh.uDbgColor = -1;
+    sh.uDbgNoAT = -1;
+    sh.uDbgAlphaView = -1;
+    sh.uDbgNoTex = -1;
     sh.id =
         CompileShader(src.vertex_source.c_str(), src.fragment_source.c_str());
     static const bool s_shdump2 = std::getenv("NWII_SHADERDUMP") != nullptr;
@@ -547,6 +680,9 @@ static void SetupDrawState(const GXCommand &cmd) {
       sh.uTevColor = glGetUniformLocation(sh.id, "uTevColor");
     sh.uTexOnly = glGetUniformLocation(sh.id, "uTexOnly");
     sh.uDbgColor = glGetUniformLocation(sh.id, "uDbgColor");
+    sh.uDbgNoAT = glGetUniformLocation(sh.id, "uDbgNoAT");
+    sh.uDbgAlphaView = glGetUniformLocation(sh.id, "uDbgAlphaView");
+    sh.uDbgNoTex = glGetUniformLocation(sh.id, "uDbgNoTex");
     static const bool s_gxtrace3 = std::getenv("NWII_GXTRACE") != nullptr;
     if (s_gxtrace3) {
       static int un = 0;
@@ -1023,6 +1159,12 @@ static void SetupDrawState(const GXCommand &cmd) {
     }
     glUniform4fv(s_active_shader.uDbgColor, 1, dc);
   }
+  if (s_active_shader.uDbgNoAT >= 0)
+    glUniform1f(s_active_shader.uDbgNoAT, nwii::runtime::gxdbg::no_alpha_test ? 1.0f : 0.0f);
+  if (s_active_shader.uDbgAlphaView >= 0)
+    glUniform1f(s_active_shader.uDbgAlphaView, nwii::runtime::gxdbg::alpha_view ? 1.0f : 0.0f);
+  if (s_active_shader.uDbgNoTex >= 0)
+    glUniform1f(s_active_shader.uDbgNoTex, nwii::runtime::gxdbg::no_tex ? 1.0f : 0.0f);
 }
 
 static void EmitPrimitive(const GXCommand &cmd) {

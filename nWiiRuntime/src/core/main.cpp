@@ -4,6 +4,7 @@
 #include "input/sources/phone_source.h"
 #include "loader/loader.h"
 #include "runtime/config.h"
+#include "runtime/gx_debug.h"
 #include "runtime/cpu_context.h"
 #include "runtime/virtual_disc.h"
 #include <algorithm>
@@ -818,6 +819,55 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("NWII_MAX_SECONDS")) max_seconds = std::atof(e);
     const auto run_start = std::chrono::steady_clock::now();
 
+    auto gx_toggle = [&window](int which) {
+      switch (which) {
+      case 1:
+        nwii::runtime::gxdbg::no_alpha_test = !nwii::runtime::gxdbg::no_alpha_test;
+        std::cout << "[GXDBG] alpha test " << (nwii::runtime::gxdbg::no_alpha_test ? "off" : "on") << std::endl;
+        break;
+      case 2:
+        nwii::runtime::gxdbg::alpha_view = !nwii::runtime::gxdbg::alpha_view;
+        std::cout << "[GXDBG] alpha view " << (nwii::runtime::gxdbg::alpha_view ? "on" : "off") << std::endl;
+        break;
+      case 3:
+        nwii::runtime::gxdbg::no_tex = !nwii::runtime::gxdbg::no_tex;
+        std::cout << "[GXDBG] no texture " << (nwii::runtime::gxdbg::no_tex ? "on" : "off") << std::endl;
+        break;
+      case 4:
+        nwii::runtime::gxdbg::no_blend = !nwii::runtime::gxdbg::no_blend;
+        std::cout << "[GXDBG] blending " << (nwii::runtime::gxdbg::no_blend ? "off" : "on") << std::endl;
+        break;
+      case 5:
+        nwii::runtime::gxdbg::skip_blend = !nwii::runtime::gxdbg::skip_blend;
+        std::cout << "[GXDBG] skip blended " << (nwii::runtime::gxdbg::skip_blend ? "on" : "off") << std::endl;
+        break;
+      case 6:
+        nwii::runtime::gxdbg::only_blend = !nwii::runtime::gxdbg::only_blend;
+        std::cout << "[GXDBG] only blended " << (nwii::runtime::gxdbg::only_blend ? "on" : "off") << std::endl;
+        break;
+      }
+      std::string title = "NWiiRecomp";
+      if (nwii::runtime::gxdbg::no_alpha_test) title += " [noAT]";
+      if (nwii::runtime::gxdbg::alpha_view) title += " [alphaView]";
+      if (nwii::runtime::gxdbg::no_tex) title += " [noTex]";
+      if (nwii::runtime::gxdbg::no_blend) title += " [noBlend]";
+      if (nwii::runtime::gxdbg::skip_blend) title += " [skipBlend]";
+      if (nwii::runtime::gxdbg::only_blend) title += " [onlyBlend]";
+      if (nwii::runtime::gxdbg::solo_count)
+        title += " [solo=" + std::to_string(nwii::runtime::gxdbg::solo_count) + "]";
+      if (nwii::runtime::gxdbg::no_cull) title += " [noCull]";
+      if (nwii::runtime::gxdbg::no_depth) title += " [noDepth]";
+      if (nwii::runtime::gxdbg::skip_tex_addr) {
+        char b[32];
+        std::snprintf(b, sizeof(b), " [skipTex=%08X]", nwii::runtime::gxdbg::skip_tex_addr);
+        title += b;
+      }
+      SDL_SetWindowTitle(window, title.c_str());
+    };
+    std::cout << "[GXDBG] hotkeys: Ctrl+5..9,0 = alpha test / alpha view / no tex "
+                 "/ no blend / skip blended / only blended (F5..F10 too)"
+              << std::endl;
+
     while (!quit && ctx->is_running) {
       xfb_present = false;
       if (max_seconds > 0.0) {
@@ -836,6 +886,9 @@ int main(int argc, char **argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
           if (e.type == SDL_QUIT) quit = true;
+          // Debug toggles are handled by the polled keyboard check below;
+          // doing it here as well double-toggles (on then immediately off).
+
         }
       }
 
@@ -1090,6 +1143,79 @@ int main(int argc, char **argv) {
             worst = 0.0;
           }
         }
+      }
+
+      if (!headless) {
+        // Polled fallback: some macOS window/focus states deliver no
+        // SDL_KEYDOWN events. Use the same keyboard-state path as game input.
+        const Uint8 *ks = SDL_GetKeyboardState(nullptr);
+        const bool ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
+        static bool prev[8] = {};
+        static const int numkeys[6] = {SDL_SCANCODE_5, SDL_SCANCODE_6,
+                                       SDL_SCANCODE_7, SDL_SCANCODE_8,
+                                       SDL_SCANCODE_9, SDL_SCANCODE_0};
+        static const int fkeys[6] = {SDL_SCANCODE_F5, SDL_SCANCODE_F6,
+                                     SDL_SCANCODE_F7, SDL_SCANCODE_F8,
+                                     SDL_SCANCODE_F9, SDL_SCANCODE_F10};
+        for (int i = 0; i < 6; ++i) {
+          const bool on = ctrl ? ks[numkeys[i]] != 0 : ks[fkeys[i]] != 0;
+          if (on && !prev[i]) gx_toggle(i + 1);
+          prev[i] = on;
+        }
+        // Ctrl+] cycles the solo vertex count; Ctrl+[ clears it.
+        static const int solo_steps[] = {0, 4, 6, 8, 12, 24, 48, 72, 96, 264, 576};
+        static int solo_idx = 0;
+        static bool prev_next = false, prev_prev = false;
+        const bool next = ctrl && ks[SDL_SCANCODE_RIGHTBRACKET] != 0;
+        const bool prevk = ctrl && ks[SDL_SCANCODE_LEFTBRACKET] != 0;
+        if (next && !prev_next) {
+          solo_idx = (solo_idx + 1) % 11;
+          nwii::runtime::gxdbg::solo_count = solo_steps[solo_idx];
+          std::string t = "NWiiRecomp";
+          if (nwii::runtime::gxdbg::solo_count)
+            t += " [solo=" + std::to_string(nwii::runtime::gxdbg::solo_count) + "]";
+          SDL_SetWindowTitle(window, t.c_str());
+          std::cout << "[GXDBG] solo=" << nwii::runtime::gxdbg::solo_count << std::endl;
+        }
+        if (prevk && !prev_prev) {
+          solo_idx = 0;
+          nwii::runtime::gxdbg::solo_count = 0;
+          SDL_SetWindowTitle(window, "NWiiRecomp");
+          std::cout << "[GXDBG] solo=0" << std::endl;
+        }
+        prev_next = next;
+        prev_prev = prevk;
+        // Ctrl+M cycles skipping a texture from the scene's 4-vertex suspects.
+        static const unsigned tex_list[] = {
+            0,          0x11CE2560, 0x13CDB1C0, 0x008A8040, 0x1065E080,
+            0x10BAAFC0, 0x112A9FE0, 0x10588220, 0x009C5080, 0x00A30880,
+            0x106B3620, 0x10749680};
+        static int tex_idx = 0;
+        static bool prev_tex = false;
+        const bool texk = ctrl && ks[SDL_SCANCODE_M] != 0;
+        if (texk && !prev_tex) {
+          tex_idx = (tex_idx + 1) % 12;
+          nwii::runtime::gxdbg::skip_tex_addr = tex_list[tex_idx];
+          char b[64];
+          std::snprintf(b, sizeof(b), "[GXDBG] skipTex=%08X",
+                        nwii::runtime::gxdbg::skip_tex_addr);
+          std::cout << b << std::endl;
+          SDL_SetWindowTitle(window, b);
+        }
+        prev_tex = texk;
+        static bool prev_n = false, prev_b = false;
+        const bool nk = ctrl && ks[SDL_SCANCODE_N] != 0;
+        const bool bk = ctrl && ks[SDL_SCANCODE_B] != 0;
+        if (nk && !prev_n) {
+          nwii::runtime::gxdbg::no_cull = !nwii::runtime::gxdbg::no_cull;
+          std::cout << "[GXDBG] culling " << (nwii::runtime::gxdbg::no_cull ? "off" : "on") << std::endl;
+        }
+        if (bk && !prev_b) {
+          nwii::runtime::gxdbg::no_depth = !nwii::runtime::gxdbg::no_depth;
+          std::cout << "[GXDBG] depth " << (nwii::runtime::gxdbg::no_depth ? "off" : "on") << std::endl;
+        }
+        prev_n = nk;
+        prev_b = bk;
       }
 
       if (audio_dev > 0) {
