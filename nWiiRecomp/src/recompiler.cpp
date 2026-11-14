@@ -925,6 +925,18 @@ void Recompiler::emit_function(std::ostream &out,
 
   
   
+  // Cache maintenance is meaningless without a guest cache model, and the
+  // dcbf/dcbst loops can spin for enormous or bogus ranges (the streaming
+  // code passes buffer pointers that wrap). Compile them to a return.
+  if (func_name.rfind("DCFlushRange", 0) == 0 ||
+      func_name.rfind("DCInvalidateRange", 0) == 0 ||
+      func_name.rfind("DCStoreRange", 0) == 0) {
+    out << "    // cache maintenance: no-op without a guest cache\n";
+    out << "    ctx.pc = ctx.lr; return;\n";
+    out << "}\n\n";
+    return;
+  }
+
   bool all_zero = !func.instructions.empty();
   for (const auto &inst : func.instructions) {
     if (inst.opcode != 0) {
