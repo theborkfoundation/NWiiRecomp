@@ -1036,6 +1036,10 @@ int main(int argc, char **argv) {
           static int16_t abuf[1024 * 2];
           nwii::runtime::hw::dsp_audio_pull(abuf, 1024);
           nwii::runtime::movie_audio_mix(abuf, 1024);
+          if (const char *rec = std::getenv("NWII_AXREC")) {
+            static FILE *rf = std::fopen(rec, "wb");
+            if (rf) std::fwrite(abuf, 4, 1024, rf);
+          }
           SDL_QueueAudio(audio_dev, abuf, 1024 * 4);
         }
       }

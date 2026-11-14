@@ -29,7 +29,10 @@ static uint32_t ar_cnt = 0;
 
 
 
-static constexpr uint16_t CSR_INT_BITS = 0x00A8; 
+// Mask bits that pair with the interrupt cause bits: AIINTMASK(0x04),
+// ARINTMASK(0x10), DSPINTMASK(0x40). The pending test is
+// (csr >> 1) & csr & these, as in Dolphin's UDSPControl handling.
+static constexpr uint16_t CSR_INT_BITS = 0x00A8;
 static uint16_t dsp_control = 0x0800; 
 static uint16_t ar_size = 0;    
 static uint16_t ar_mode = 0;    
@@ -44,6 +47,12 @@ static void dsp_update_pi();
 static void ar_dma_execute() {
     bool dir = (ar_cnt & 0x80000000) != 0;
     uint32_t count = ar_cnt & 0x7FFFFFFF;
+    if (std::getenv("NWII_ARTRACE")) {
+      static int n = 0;
+      if (n++ < 40)
+        std::printf("[ARDMA] cnt=%u dir=%d mm=%08X ar=%08X\n", count, (int)dir,
+                    ar_mmaddr, ar_araddr);
+    }
     uint32_t mm = ar_mmaddr & 0x01FFFFFF;
     uint32_t ar_a = ar_araddr & 0x00FFFFFF;
     if (g_mmu && count > 0) {
@@ -156,11 +165,13 @@ static void dsp_update_pi() {
 
 
 
+
+
 int dsp_pending_os_interrupt() {
     uint16_t pending = (dsp_control >> 1) & dsp_control & CSR_INT_BITS;
-    if (pending & 0x0080) return 7; 
-    if (pending & 0x0020) return 6; 
-    if (pending & 0x0008) return 5; 
+    if (pending & 0x0080) return 7;  // DSP
+    if (pending & 0x0020) return 6;  // ARAM
+    if (pending & 0x0008) return 5;  // AI
     return 7;
 }
 

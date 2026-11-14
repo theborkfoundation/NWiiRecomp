@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <unordered_map>
 
 namespace nwii::runtime {
@@ -38,6 +39,12 @@ inline int16_t clamp16(int32_t v) {
 bool axdbg() {
   static const bool v = std::getenv("NWII_AXDBG") != nullptr;
   return v;
+}
+
+static long ax_ms() {
+  static const auto t0 = std::chrono::steady_clock::now();
+  return (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - t0).count();
 }
 
 inline uint16_t bswap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
@@ -305,15 +312,19 @@ void AXHle::process_pbs(uint32_t addr) {
         {
           static std::unordered_map<uint32_t, bool> last_run;
           const bool started = pb.running == 1 && !last_run[addr];
+          const bool stopped = pb.running != 1 && last_run[addr];
           if (started)
             g_adpcm.erase(addr);
+          if (stopped && std::getenv("NWII_SNDLOG"))
+            std::printf("[STOP t=%ldms] pb=%08X fmt=%u\n", ax_ms(), addr,
+                        pb.audio_addr.sample_format);
           last_run[addr] = (pb.running == 1);
           if (started && std::getenv("NWII_SNDLOG")) {
             static int n = 0;
             if (n++ < 40)
-              std::printf("[SFX] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
+              std::printf("[SFX t=%ldms] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
                           "ml=%u mr=%u mc=%u\n",
-                          addr, pb.audio_addr.sample_format,
+                          ax_ms(), addr, pb.audio_addr.sample_format,
                           hilo(pb.audio_addr.cur_addr_hi, pb.audio_addr.cur_addr_lo),
                           hilo(pb.audio_addr.end_addr_hi, pb.audio_addr.end_addr_lo),
                           (unsigned)pb.vol_env.cur_volume,
@@ -330,15 +341,19 @@ void AXHle::process_pbs(uint32_t addr) {
       {
         static std::unordered_map<uint32_t, bool> last_run;
         const bool started = pb.running == 1 && !last_run[addr];
+        const bool stopped = pb.running != 1 && last_run[addr];
         if (started)
           g_adpcm.erase(addr);
+        if (stopped && std::getenv("NWII_SNDLOG"))
+          std::printf("[STOP t=%ldms] pb=%08X fmt=%u\n", ax_ms(), addr,
+                      pb.audio_addr.sample_format);
         last_run[addr] = (pb.running == 1);
         if (started && std::getenv("NWII_SNDLOG")) {
           static int n = 0;
           if (n++ < 40)
-            std::printf("[SFX] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
+            std::printf("[SFX t=%ldms] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
                         "ml=%u mr=%u mc=%u\n",
-                        addr, pb.audio_addr.sample_format,
+                        ax_ms(), addr, pb.audio_addr.sample_format,
                         hilo(pb.audio_addr.cur_addr_hi, pb.audio_addr.cur_addr_lo),
                         hilo(pb.audio_addr.end_addr_hi, pb.audio_addr.end_addr_lo),
                         (unsigned)pb.vol_env.cur_volume,
@@ -419,14 +434,9 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
   auto xlat = [](uint32_t a) -> uint32_t {
     if (a >= 0x08000000u && a < 0x10000000u) {
       const uint64_t b = (uint64_t)a * 2;
-      if (b >= 0x10000000u && b < 0x14000000u)
-        return 0x90000000u + (uint32_t)(b - 0x10000000u);
+      if (b & 0x10000000u)
+        return 0x90000000u | ((uint32_t)b & 0x03FFFFFFu);
     }
-    // AX sample addresses carry a 0x2xxxxxxx tag; the low 24 bits are the DSP
-    // ARAM offset. This runtime backs ARAM with MEM2 (the ARAM DMA copies into
-    // MEM2 at that offset), so read it through the MEM2 window.
-    if (a >= 0x20000000u && a < 0x30000000u)
-      return 0x90000000u | (a & 0x00FFFFFFu);
     return a;
   };
 
@@ -479,10 +489,32 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
     auto byte_addr = [](uint32_t nib) -> uint32_t {
       const uint32_t b = nib >> 1;
       if (b & 0x10000000u)
-        return 0x90000000u | (b & 0x00FFFFFFu);
+        return 0x90000000u | (b & 0x03FFFFFFu);  // Wii ARAM == MEM2 (EXRAM)
       return 0x80000000u | (b & 0x01FFFFFFu);
     };
 
+    if (const char *dp = std::getenv("NWII_ADUMP")) {
+      static std::unordered_map<uint64_t, int> done;
+      const uint64_t key = (uint64_t)cur_pb_;
+      if (addr >= 0x22000000u && !done.count(key) && done.size() < 16) {
+        done[key] = 1;
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s_%08X_%08X.raw", dp, cur_pb_, addr);
+        if (FILE *f = std::fopen(path, "wb")) {
+          const uint32_t base = byte_addr(addr);
+          for (uint32_t o = 0; o < 0x2000; ++o)
+            std::fputc(rd8(base + o), f);
+          std::fclose(f);
+        }
+        std::printf("[ADUMP] pb=%08X addr=%08X byte=%08X ps=%04X gain=%u "
+                    "coefs=%d,%d,%d,%d,%d,%d,%d,%d -> %s\n",
+                    cur_pb_, addr, byte_addr(addr), pb.adpcm.pred_scale,
+                    pb.adpcm.gain, pb.adpcm.coefs[0], pb.adpcm.coefs[1],
+                    pb.adpcm.coefs[2], pb.adpcm.coefs[3], pb.adpcm.coefs[4],
+                    pb.adpcm.coefs[5], pb.adpcm.coefs[6], pb.adpcm.coefs[7],
+                    path);
+      }
+    }
     AdpcmState &st = g_adpcm[cur_pb_];
     if (!st.init || st.frame != addr) {
       st.frame = addr;
@@ -568,8 +600,8 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
       static std::unordered_map<uint32_t, int> shown;
       if (!shown.count(cur_pb_)) {
         shown[cur_pb_] = 1;
-        std::printf("[ADPCM] pb=%08X nib=%08X byte=%08X mean_delta=%lld peak=%d\n",
-                    cur_pb_, addr, byte_addr(addr),
+        std::printf("[ADPCM t=%ldms] pb=%08X nib=%08X byte=%08X mean_delta=%lld peak=%d\n",
+                    ax_ms(), cur_pb_, addr, byte_addr(addr),
                     (long long)(metric_diff / (count - 1)), metric_peak);
       }
     }
@@ -723,15 +755,20 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
       if (tone_phase > 6.283185307179586)
         tone_phase -= 6.283185307179586;
     }
-    const int16_t l = clamp16((int32_t)(((int64_t)main_l_[i] * v) >> 15) + t);
-    const int16_t r = clamp16((int32_t)(((int64_t)main_r_[i] * v) >> 15) + t);
+    const int32_t rawl = (int32_t)(((int64_t)main_l_[i] * v) >> 15) + t;
+    const int32_t rawr = (int32_t)(((int64_t)main_r_[i] * v) >> 15) + t;
+    const int16_t l = clamp16(rawl);
+    const int16_t r = clamp16(rawr);
     if (std::getenv("NWII_SNDLOG")) {
-      static int n = 0, peak = 0;
+      static int n = 0, peak = 0, clip = 0;
       peak = std::max(peak, std::abs((int)l));
       peak = std::max(peak, std::abs((int)r));
+      if (rawl > 32767 || rawl < -32768 || rawr > 32767 || rawr < -32768)
+        ++clip;
       if (++n >= 100) {
-        std::printf("[SND] out peak=%d\n", peak);
+        std::printf("[SND t=%ldms] out peak=%d clip=%d\n", ax_ms(), peak, clip);
         peak = 0;
+        clip = 0;
         n = 0;
       }
     }
