@@ -160,6 +160,7 @@ size_t VirtualDisc::read(uint64_t offset, uint32_t len, uint8_t* dst) {
             f = m_cached_file;
         } else {
             if (m_cached_file) {
+                movie_audio_on_close(m_cached_path);
                 fclose(m_cached_file);
                 m_cached_file = nullptr;
             }

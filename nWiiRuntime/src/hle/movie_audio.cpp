@@ -132,6 +132,16 @@ void movie_audio_on_disc_read(const std::string &host_path, uint64_t rel_offset,
   }
 }
 
+void movie_audio_on_close(const std::string &host_path) {
+  MovieAudio &s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  if (s.path == host_path) {
+    s.active = false;
+    if (std::getenv("NWII_MOVIEAUDDBG"))
+      std::printf("[MovieAudio] stop %s\n", host_path.c_str());
+  }
+}
+
 void movie_audio_mix(int16_t *out, size_t frames) {
   MovieAudio &s = state();
   if (!s.enabled)

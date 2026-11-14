@@ -15,4 +15,7 @@ void movie_audio_on_disc_read(const std::string &host_path, uint64_t rel_offset,
                               uint64_t file_size);
 void movie_audio_mix(int16_t *out, size_t frames);
 
+// Called when the guest closes/switches away from a disc file.
+void movie_audio_on_close(const std::string &host_path);
+
 } // namespace nwii::runtime
