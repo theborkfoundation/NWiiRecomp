@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/ios_kernel.h"
 #include <iostream>
 
@@ -11,7 +12,9 @@ void IOSKernel::init() {
 }
 
 void IOSKernel::register_device(std::unique_ptr<IDevice> device) {
-    std::cout << "[IOSKernel] Registered device: " << device->get_name() << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+      std::cout << "[IOSKernel] Registered device: " << device->get_name() << std::endl;
+    }
     m_devices.push_back(std::move(device));
 }
 
@@ -51,7 +54,9 @@ int32_t IOSKernel::open(CPUContext& ctx, const std::string& path, uint32_t mode)
             return res;
         }
     }
-    std::cout << "[IOSKernel] open: device not found for path: " << path << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+      std::cout << "[IOSKernel] open: device not found for path: " << path << std::endl;
+    }
     return IPC_ENOENT;
 }
 

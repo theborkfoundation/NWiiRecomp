@@ -56,6 +56,7 @@ struct CPUContext;
 void init_ipc_client(CPUContext &ctx);
 bool handle_syscall(CPUContext &ctx);
 bool process_pending_callbacks(CPUContext &ctx);
+bool trace_spin();
 
 struct CallbackInfo {
     uint32_t cb_addr;

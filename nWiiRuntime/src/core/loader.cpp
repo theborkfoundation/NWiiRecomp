@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "loader/loader.h"
 #include <fstream>
 #include <iostream>
@@ -221,7 +222,9 @@ bool Executable::load_unpacked_game(const std::string& path) {
             char game_id_buf[7] = {0};
             if (boot.read(game_id_buf, 6)) {
                 nwii::runtime::Config::get().game_id = std::string(game_id_buf);
-                std::cout << "[Loader] Parsed Game ID from boot.bin: " << nwii::runtime::Config::get().game_id << std::endl;
+                if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+                  std::cout << "[Loader] Parsed Game ID from boot.bin: " << nwii::runtime::Config::get().game_id << std::endl;
+                }
             }
         }
     }

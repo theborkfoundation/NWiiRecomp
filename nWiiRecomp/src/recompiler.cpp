@@ -1249,7 +1249,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.pc = 0x" << std::hex << std::uppercase << inst.address
           << std::dec << ";\n";
       out << "    if (process_pending_callbacks(ctx)) return;\n";
-      out << "    if ((ctx.inst_count % 10000000) == 0) { std::cout << "
+      out << "    if (nwii::runtime::trace_spin() && (ctx.inst_count % 10000000) == 0) { std::cout << "
              "\"Spinning at PC: 0x\" << std::hex << 0x"
           << std::uppercase << std::hex << inst.address << std::dec
           << " << \" LR: 0x\" << std::hex << ctx.lr << std::dec << std::endl; "
@@ -1358,7 +1358,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.pc = 0x" << std::hex << std::uppercase << inst.address
           << std::dec << ";\n";
       out << "    if (process_pending_callbacks(ctx)) return;\n";
-      out << "    if ((ctx.inst_count % 10000000) == 0) { std::cout << "
+      out << "    if (nwii::runtime::trace_spin() && (ctx.inst_count % 10000000) == 0) { std::cout << "
              "\"Spinning at PC: 0x\" << std::hex << 0x"
           << std::uppercase << std::hex << inst.address << std::dec
           << " << \" LR: 0x\" << std::hex << ctx.lr << std::dec << std::endl; "

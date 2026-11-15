@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/platform/wii_platform.h"
 #include "runtime/ios_kernel.h"
 #include <iostream>
@@ -15,32 +16,40 @@ static const int32_t IPC_OK = 0;
 
 void WiiPlatform::ios_open(CPUContext& ctx) {
   uint32_t path_ptr = ctx.gpr[3];
-  std::cout << "[HLE IOS] IOS_Open called with r3=0x" << std::hex << path_ptr
-            << " r4=0x" << ctx.gpr[4] << " r5=0x" << ctx.gpr[5] << " r6=0x"
-            << ctx.gpr[6] << " pc=0x" << ctx.pc << " lr=0x" << ctx.lr
-            << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Open called with r3=0x" << std::hex << path_ptr
+              << " r4=0x" << ctx.gpr[4] << " r5=0x" << ctx.gpr[5] << " r6=0x"
+              << ctx.gpr[6] << " pc=0x" << ctx.pc << " lr=0x" << ctx.lr
+              << std::dec << std::endl;
+  }
   std::string path = nwii::runtime::read_guest_string(ctx, path_ptr);
 
   if (path.empty()) {
     if (path_ptr == 0x41 || path_ptr == 2) {
-      std::cout << "[HLE IOS] IOS_Open: Detected pointer error (0x" << std::hex
-                << path_ptr << "). Faking /dev/di fd=2" << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+        std::cout << "[HLE IOS] IOS_Open: Detected pointer error (0x" << std::hex
+                  << path_ptr << "). Faking /dev/di fd=2" << std::endl;
+      }
       ctx.gpr[3] = 2;
       ctx.pc = ctx.lr;
       return;
     }
 
     if (path_ptr != 0) {
-      std::cout << "[HLE IOS] IOS_Open ERROR: Could not read path at 0x"
-                << std::hex << path_ptr << std::dec << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+        std::cout << "[HLE IOS] IOS_Open ERROR: Could not read path at 0x"
+                  << std::hex << path_ptr << std::dec << std::endl;
+      }
       ctx.gpr[3] = -106;
       ctx.pc = ctx.lr;
       return;
     }
 
-    std::cout << "[HLE IOS] IOS_Open: empty path (ptr=0x" << std::hex
-              << path_ptr << std::dec << "), faking failure with -106"
-              << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] IOS_Open: empty path (ptr=0x" << std::hex
+                << path_ptr << std::dec << "), faking failure with -106"
+                << std::endl;
+    }
     ctx.gpr[3] = -106;
     ctx.pc = ctx.lr;
     return;
@@ -48,7 +57,9 @@ void WiiPlatform::ios_open(CPUContext& ctx) {
 
   int32_t fd = IOSKernel::get().open(ctx, path, 0);
 
-  std::cout << "[HLE IOS] IOS_Open: path='" << path << "' -> fd=" << fd << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Open: path='" << path << "' -> fd=" << fd << std::endl;
+  }
   ctx.gpr[3] = fd;
   ctx.pc = ctx.lr;
 }
@@ -59,8 +70,10 @@ void WiiPlatform::ios_open_async(CPUContext& ctx) {
   uint32_t userdata = ctx.gpr[6];
 
   if (path.empty()) {
-    std::cout << "[HLE IOS] IOS_OpenAsync: empty path, faking failure"
-              << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] IOS_OpenAsync: empty path, faking failure"
+                << std::endl;
+    }
     if (nwii::runtime::valid_callback(callback)) {
       ctx.queue_callback(callback, -106, userdata);
     }
@@ -71,8 +84,10 @@ void WiiPlatform::ios_open_async(CPUContext& ctx) {
 
   int32_t fd = IOSKernel::get().open(ctx, path, 0);
 
-  std::cout << "[HLE IOS] IOS_OpenAsync: path='" << path << "' -> fd=" << fd 
-            << " cb=0x" << std::hex << callback << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_OpenAsync: path='" << path << "' -> fd=" << fd 
+              << " cb=0x" << std::hex << callback << std::dec << std::endl;
+  }
 
   if (nwii::runtime::valid_callback(callback)) {
     ctx.queue_callback(callback, fd, userdata);
@@ -86,8 +101,10 @@ void WiiPlatform::ios_close(CPUContext& ctx) {
   int32_t fd = (int32_t)ctx.gpr[3];
   int32_t result = IOSKernel::get().close(ctx, fd);
 
-  std::cout << "[HLE IOS] IOS_Close: fd=" << fd << " -> result=" << result
-            << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Close: fd=" << fd << " -> result=" << result
+              << std::endl;
+  }
   ctx.gpr[3] = result;
   ctx.pc = ctx.lr;
 }
@@ -99,8 +116,10 @@ void WiiPlatform::ios_close_async(CPUContext& ctx) {
 
   int32_t result = IOSKernel::get().close(ctx, fd);
 
-  std::cout << "[HLE IOS] IOS_CloseAsync: fd=" << fd << " cb=0x" << std::hex
-            << callback << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_CloseAsync: fd=" << fd << " cb=0x" << std::hex
+              << callback << std::dec << std::endl;
+  }
 
   if (nwii::runtime::valid_callback(callback)) {
     ctx.queue_callback(callback, result, userdata);
@@ -116,9 +135,11 @@ void WiiPlatform::ios_read(CPUContext& ctx) {
 
   int32_t result = IOSKernel::get().read(ctx, fd, buf, len);
 
-  std::cout << "[HLE IOS] IOS_Read: fd=" << fd << " buf=0x" << std::hex << buf
-            << " len=" << std::dec << len << " -> result=" << result
-            << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Read: fd=" << fd << " buf=0x" << std::hex << buf
+              << " len=" << std::dec << len << " -> result=" << result
+              << std::endl;
+  }
   ctx.gpr[3] = result;
   ctx.pc = ctx.lr;
 }
@@ -132,9 +153,11 @@ void WiiPlatform::ios_read_async(CPUContext& ctx) {
 
   int32_t result = IOSKernel::get().read(ctx, fd, buf, len);
 
-  std::cout << "[HLE IOS] IOS_ReadAsync: fd=" << fd << " buf=0x" << std::hex
-            << buf << " len=" << std::dec << len << " -> result=" << result
-            << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_ReadAsync: fd=" << fd << " buf=0x" << std::hex
+              << buf << " len=" << std::dec << len << " -> result=" << result
+              << std::endl;
+  }
 
   if (nwii::runtime::valid_callback(callback)) {
     ctx.queue_callback(callback, result, userdata);
@@ -177,8 +200,10 @@ void WiiPlatform::ios_ioctl(CPUContext& ctx) {
   uint32_t arg1 = ctx.gpr[4]; 
   uint32_t arg2 = ctx.gpr[5]; 
 
-  std::cout << "[HLE IOS] IOS_Ioctl: fd=" << fd << " cmd=0x" << std::hex << arg1
-            << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Ioctl: fd=" << fd << " cmd=0x" << std::hex << arg1
+              << std::dec << std::endl;
+  }
 
   IpcRequest req{};
   req.fd = fd;
@@ -201,11 +226,13 @@ void WiiPlatform::ios_ioctl_async(CPUContext& ctx) {
   uint32_t userdata = ctx.gpr[10];
 
   if (std::getenv("NWII_SAMPLE")) {
-    std::cout << "[HLE IOS] IOS_IoctlAsync: PC=0x" << std::hex << ctx.pc << " LR=0x" << ctx.lr << " fd=" << std::dec << fd << " cmd=0x" << std::hex
-              << cmd << " inbuf=0x" << inbuf << " inlen=0x" << ctx.gpr[6]
-              << " outbuf=0x" << ctx.gpr[7] << " outlen=0x" << ctx.gpr[8]
-              << " cb=0x" << callback << " ud=0x" << userdata << std::dec
-              << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] IOS_IoctlAsync: PC=0x" << std::hex << ctx.pc << " LR=0x" << ctx.lr << " fd=" << std::dec << fd << " cmd=0x" << std::hex
+                << cmd << " inbuf=0x" << inbuf << " inlen=0x" << ctx.gpr[6]
+                << " outbuf=0x" << ctx.gpr[7] << " outlen=0x" << ctx.gpr[8]
+                << " cb=0x" << callback << " ud=0x" << userdata << std::dec
+                << std::endl;
+    }
   }
 
   int32_t result = IPC_OK;
@@ -234,8 +261,10 @@ void WiiPlatform::ios_ioctlv(CPUContext& ctx) {
   uint32_t arg_out = ctx.gpr[6];
   uint32_t arg_array = ctx.gpr[7];
 
-  std::cout << "[HLE IOS] IOS_Ioctlv: fd=" << fd << " cmd=0x" << std::hex << cmd
-            << " in=" << std::dec << arg_in << " out=" << arg_out << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_Ioctlv: fd=" << fd << " cmd=0x" << std::hex << cmd
+              << " in=" << std::dec << arg_in << " out=" << arg_out << std::endl;
+  }
 
   IpcRequest req{};
   req.fd = fd;
@@ -260,8 +289,10 @@ void WiiPlatform::ios_ioctlv_async(CPUContext& ctx) {
   uint32_t callback = ctx.gpr[8];
   uint32_t userdata = ctx.gpr[9];
 
-  std::cout << "[HLE IOS] IOS_IoctlvAsync: fd=" << fd << " cmd=0x" << std::hex
-            << cmd << " cb=0x" << callback << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] IOS_IoctlvAsync: fd=" << fd << " cmd=0x" << std::hex
+              << cmd << " cb=0x" << callback << std::dec << std::endl;
+  }
 
   int32_t result = IPC_OK;
   IpcRequest req{};

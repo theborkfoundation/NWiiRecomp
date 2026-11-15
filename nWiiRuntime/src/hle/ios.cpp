@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/platform/platform.h"
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
@@ -57,8 +58,10 @@ std::string nwii::runtime::read_guest_string(CPUContext &ctx, uint32_t addr,
                                      int max_len) {
   std::string path;
   if (addr == 0) {
-    std::cout << "[HLE IOS] read_guest_string: null address! pc=0x" << std::hex
-              << ctx.pc << " lr=0x" << ctx.lr << std::dec << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] read_guest_string: null address! pc=0x" << std::hex
+                << ctx.pc << " lr=0x" << ctx.lr << std::dec << std::endl;
+    }
     return path;
   }
   uint32_t vaddr = phys_to_virt(addr);
@@ -71,16 +74,20 @@ std::string nwii::runtime::read_guest_string(CPUContext &ctx, uint32_t addr,
         path += c;
     }
     if (path.empty()) {
-      std::cout << "[HLE IOS] read_guest_string: string at 0x" << std::hex
-                << addr << " (vaddr 0x" << vaddr
-                << ") is empty (first char is 0x" << (int)ctx.mmu.read8(vaddr)
-                << ") pc=0x" << ctx.pc << " lr=0x" << ctx.lr << std::dec
-                << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+        std::cout << "[HLE IOS] read_guest_string: string at 0x" << std::hex
+                  << addr << " (vaddr 0x" << vaddr
+                  << ") is empty (first char is 0x" << (int)ctx.mmu.read8(vaddr)
+                  << ") pc=0x" << ctx.pc << " lr=0x" << ctx.lr << std::dec
+                  << std::endl;
+      }
     }
   } else {
-    std::cout << "[HLE IOS] read_guest_string: invalid translated address 0x"
-              << std::hex << vaddr << " (orig: 0x" << addr << ") pc=0x"
-              << ctx.pc << " lr=0x" << ctx.lr << std::dec << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] read_guest_string: invalid translated address 0x"
+                << std::hex << vaddr << " (orig: 0x" << addr << ") pc=0x"
+                << ctx.pc << " lr=0x" << ctx.lr << std::dec << std::endl;
+    }
   }
   return path;
 }
@@ -167,8 +174,10 @@ static bool init_wbfs(const std::filesystem::path &path) {
 
   g_disc_file = file;
   g_disc_is_wbfs = true;
-  std::cout << "[HLE IOS] Opened WBFS: " << path
-            << " block_size=" << g_wbfs_block_size << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] Opened WBFS: " << path
+              << " block_size=" << g_wbfs_block_size << std::endl;
+  }
   return true;
 }
 
@@ -176,7 +185,9 @@ static void init_iso(const std::filesystem::path &path) {
   g_disc_file = std::make_shared<std::ifstream>(path, std::ios::binary);
   if (g_disc_file->is_open()) {
     g_disc_is_wbfs = false;
-    std::cout << "[HLE IOS] Opened ISO: " << path << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] Opened ISO: " << path << std::endl;
+    }
   }
 }
 
@@ -323,18 +334,22 @@ static void di_read_internal(nwii::runtime::MMU *mmu, uint32_t inbuf, uint32_t o
       addr = outbuf;
   }
 
-  std::cout << "[HLE IOS] DI_Read" << (is_async ? "Async" : "") << ": inbuf=0x"
-            << std::hex << inbuf << " cmd=0x" << cmd
-            << " transferSize=" << std::dec << transferSize << " addr=0x"
-            << std::hex << addr << " cb=0x" << callback << " offset=0x"
-            << offset << " length=" << std::dec << length << " outbuf=0x" << std::hex << outbuf << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] DI_Read" << (is_async ? "Async" : "") << ": inbuf=0x"
+              << std::hex << inbuf << " cmd=0x" << cmd
+              << " transferSize=" << std::dec << transferSize << " addr=0x"
+              << std::hex << addr << " cb=0x" << callback << " offset=0x"
+              << offset << " length=" << std::dec << length << " outbuf=0x" << std::hex << outbuf << std::endl;
+  }
 
   bool use_defaults =
       (cmd != 0x20 && cmd != 0x12 && cmd != 0x95 && cmd != 0x71 && cmd != 0x72 && cmd != 0x96 && cmd != 0xe3) || (offset > 0x1FFFFFFFFFFULL);
 
   if (use_defaults) {
-    std::cout << "[HLE IOS] DI_Read: Using defaults (invalid structure)"
-              << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HLE IOS] DI_Read: Using defaults (invalid structure)"
+                << std::endl;
+    }
     cmd = 0x20;
     transferSize = 2;
     offset = 0;
@@ -353,9 +368,11 @@ static void di_read_internal(nwii::runtime::MMU *mmu, uint32_t inbuf, uint32_t o
   if (out_size > 0 && total_length > out_size)
     total_length = out_size;
 
-  std::cout << "[HLE IOS] DI_Read final: offset=0x" << std::hex
-            << (uint32_t)offset << " total_length=" << std::dec << total_length
-            << " buf_ptr=0x" << std::hex << buf_ptr << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] DI_Read final: offset=0x" << std::hex
+              << (uint32_t)offset << " total_length=" << std::dec << total_length
+              << " buf_ptr=0x" << std::hex << buf_ptr << std::dec << std::endl;
+  }
 
   auto file = get_disc_file();
   bool success = false;
@@ -437,9 +454,11 @@ void iosAlloc(CPUContext &ctx) {
   uint32_t size = ctx.gpr[4];
   uint32_t align = ctx.gpr[5];
   uint32_t ptr = ios_guest_alloc(ctx, size, align, heap_id);
-  std::cout << "[HLE IOS] iosAlloc: heap=" << heap_id << " size=" << size
-            << " align=" << align << " -> ptr=0x" << std::hex << ptr << " LR=0x" << ctx.lr << std::dec
-            << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] iosAlloc: heap=" << heap_id << " size=" << size
+              << " align=" << align << " -> ptr=0x" << std::hex << ptr << " LR=0x" << ctx.lr << std::dec
+              << std::endl;
+  }
   ctx.gpr[3] = ptr;
   ctx.pc = ctx.lr;
 }
@@ -448,8 +467,10 @@ void iosAlloc(CPUContext &ctx) {
 void iosFree(CPUContext &ctx) {
   uint32_t heap_id = ctx.gpr[3];
   uint32_t ptr = ctx.gpr[4];
-  std::cout << "[HLE IOS] iosFree: heap=" << heap_id << " ptr=0x" << std::hex
-            << ptr << " LR=0x" << ctx.lr << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HLE IOS] iosFree: heap=" << heap_id << " ptr=0x" << std::hex
+              << ptr << " LR=0x" << ctx.lr << std::dec << std::endl;
+  }
   ctx.gpr[3] = 0; 
   ctx.pc = ctx.lr;
 }
@@ -554,7 +575,9 @@ extern "C" int32_t handle_ios_ipc(CPUContext& ctx, uint32_t request_addr) {
       path += c;
     }
     result = IOSKernel::get().open(ctx, path, mode);
-    std::cout << "[HW IPC] Open path='" << path << "' -> fd=" << result << "\n";
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HW IPC] Open path='" << path << "' -> fd=" << result << "\n";
+    }
   } else if (cmd == 2) { 
     uint32_t fd = ctx.mmu.read32(virt_addr + 0x08);
     result = IOSKernel::get().close(ctx, fd);
@@ -581,7 +604,9 @@ extern "C" int32_t handle_ios_ipc(CPUContext& ctx, uint32_t request_addr) {
     uint32_t out_buf = ctx.mmu.read32(virt_addr + 0x18);
     uint32_t out_size = ctx.mmu.read32(virt_addr + 0x1C);
 
-    std::cout << "[HW IPC] Ioctl fd=" << fd << " cmd=0x" << std::hex << ioctl_cmd << std::dec << "\n";
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HW IPC] Ioctl fd=" << fd << " cmd=0x" << std::hex << ioctl_cmd << std::dec << "\n";
+    }
 
     IpcRequest req{};
     req.fd = fd;
@@ -607,8 +632,10 @@ extern "C" int32_t handle_ios_ipc(CPUContext& ctx, uint32_t request_addr) {
     req.arg_cnt_in = arg_in;
     req.arg_cnt_out = arg_out;
 
-    std::cout << "[HW IPC] Parsed IOCTLV fd=" << fd << " cmd=" << std::hex << ioctl_cmd << std::dec 
-              << " in=" << arg_in << " out=" << arg_out << "\n";
+    if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+      std::cout << "[HW IPC] Parsed IOCTLV fd=" << fd << " cmd=" << std::hex << ioctl_cmd << std::dec 
+                << " in=" << arg_in << " out=" << arg_out << "\n";
+    }
 
     for (uint32_t i = 0; i < arg_in + arg_out; i++) {
         IoctlvVector vec;
@@ -620,8 +647,10 @@ extern "C" int32_t handle_ios_ipc(CPUContext& ctx, uint32_t request_addr) {
     result = IOSKernel::get().ioctlv(ctx, req);
   }
 
-  std::cout << "[HW IPC] cmd=" << cmd << " virt=0x" << std::hex << virt_addr
-            << " -> result=" << (int32_t)result << std::dec << std::endl;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+    std::cout << "[HW IPC] cmd=" << cmd << " virt=0x" << std::hex << virt_addr
+              << " -> result=" << (int32_t)result << std::dec << std::endl;
+  }
 
   if (result != -0x70000001) { 
       nwii::runtime::g_mmu->write32(virt_addr + 4, (uint32_t)(int32_t)result);
@@ -978,7 +1007,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
 
 
-  if ((ctx.inst_count % 20000000) == 0) {
+  if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG) &&
+      (ctx.inst_count % 20000000) == 0) {
+      if (true) {
       std::cout << "[Heartbeat] PC: 0x" << std::hex << ctx.pc << " LR: 0x" << ctx.lr
                 << " intmr=0x" << nwii::runtime::hw::pi_intmr.load()
                 << " intsr=0x" << nwii::runtime::hw::pi_intsr.load()
@@ -991,6 +1022,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
               if (h) std::cout << " " << i << ":0x" << std::hex << h << std::dec;
           }
           std::cout << "\n";
+      }
       }
 
       
@@ -1183,6 +1215,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
       
 
       
+      if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
       static uint32_t dcount = 0;
       if ((dcount++ % 500) == 0) {
           uint32_t cur = ctx.mmu.read32(0x800000E4);
@@ -1210,6 +1243,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
               }
               th = ctx.mmu.read32(th + 0x2FC);
           }
+      }
       }
       uint32_t dec_handler = ctx.mmu.read32(0x80003000 + 8 * 4);
       uint32_t current_ctx = ctx.mmu.read32(0x800000D4);

@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
 #include "runtime/hw/hw.h"
@@ -226,7 +227,9 @@ extern "C" void OSReport(CPUContext &ctx) {
       result += format_str[i];
     }
   }
-  std::cout << "[OSReport] [LR:0x" << std::hex << ctx.lr << std::dec << "] " << result;
+  if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+    std::cout << "[OSReport] [LR:0x" << std::hex << ctx.lr << std::dec << "] " << result;
+  }
 }
 
 namespace nwii::runtime {

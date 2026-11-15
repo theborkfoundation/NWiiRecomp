@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/virtual_disc.h"
 #include "runtime/movie_audio.h"
 #include <algorithm>
@@ -166,7 +167,9 @@ size_t VirtualDisc::read(uint64_t offset, uint32_t len, uint8_t* dst) {
             }
             f = fopen(r.host_path.c_str(), "rb");
             if (f) {
-                std::cout << "[VDISC_OPEN] " << r.host_path << "\n";
+                if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+                  std::cout << "[VDISC_OPEN] " << r.host_path << "\n";
+                }
                 m_cached_path = r.host_path;
                 m_cached_file = f;
             }

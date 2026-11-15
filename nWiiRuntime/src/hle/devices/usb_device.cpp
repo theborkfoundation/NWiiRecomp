@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "runtime/devices.h"
 #include "runtime/hw/hw.h"
 #include <cstdint>
@@ -24,7 +25,9 @@ public:
     }
 
     int32_t ioctl(CPUContext& ctx, const IpcRequest& req) override {
-        std::cout << "[USB] ioctl cmd=" << req.ioctl_cmd << std::endl;
+        if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+          std::cout << "[USB] ioctl cmd=" << req.ioctl_cmd << std::endl;
+        }
         return IPC_OK;
     }
 
@@ -86,7 +89,9 @@ public:
         }
 
         default:
-            std::cout << "[USB] ioctlv cmd=" << req.ioctl_cmd << std::endl;
+            if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+              std::cout << "[USB] ioctlv cmd=" << req.ioctl_cmd << std::endl;
+            }
             return IPC_OK;
         }
     }
@@ -106,8 +111,10 @@ private:
 
     void handle_hci_command(CPUContext& ctx, uint32_t p, uint32_t len) {
         uint16_t opcode = (uint16_t)(ctx.mmu.read8(p) | (ctx.mmu.read8(p + 1) << 8));
-        std::cout << "[USB] HCI command opcode 0x" << std::hex << opcode
-                  << std::dec << std::endl;
+        if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+          std::cout << "[USB] HCI command opcode 0x" << std::hex << opcode
+                    << std::dec << std::endl;
+        }
 
         if ((opcode >> 10) == 0x01)
             m_events.push_back(make_command_status(opcode));
@@ -132,8 +139,10 @@ private:
         for (uint32_t i = 0; i < n; ++i)
             ctx.mmu.write8(p + i, evt[i]);
         if (std::getenv("NWII_SAMPLE")) {
-            std::cout << "[USB] event -> 0x" << std::hex << p << " len=" << std::dec
-                      << n << " bytes:";
+            if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
+              std::cout << "[USB] event -> 0x" << std::hex << p << " len=" << std::dec
+                        << n << " bytes:";
+            }
             for (uint32_t i = 0; i < n && i < 8; ++i)
                 std::cout << " " << std::hex << (int)evt[i];
             std::cout << std::dec << "\n";

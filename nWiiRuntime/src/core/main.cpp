@@ -1,3 +1,4 @@
+#include "runtime/log.h"
 #include "input/input_manager.h"
 #include "input/sources/gamepad_source.h"
 #include "input/sources/mouse_keyboard_source.h"
@@ -126,10 +127,15 @@ void main() { oCol = texture(uTex, uv); }
 }
 } // namespace
 
+namespace nwii::runtime {
+bool trace_spin() { return log_on(LOG_TRACE); }
+} // namespace nwii::runtime
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
   nwii::runtime::diag::init();
+  nwii::runtime::log_banner();
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <path_to_unpacked_game_dir> [config_path]\n";
@@ -361,10 +367,14 @@ int main(int argc, char **argv) {
 
   for (const auto &sec : exe.sections) {
     if (!sec.is_bss) {
-      std::cout << "[Loader] Loading section at 0x" << std::hex << sec.address << " size 0x" << sec.size << std::dec << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+        std::cout << "[Loader] Loading section at 0x" << std::hex << sec.address << " size 0x" << sec.size << std::dec << std::endl;
+      }
       for (size_t i = 0; i < sec.size; ++i) {
         if ((sec.address + i) == 0x80003448) {
-            std::cout << "[Loader] Found 0x80003448 inside section! val=" << std::hex << (uint32_t)sec.data[i] << std::dec << std::endl;
+            if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+              std::cout << "[Loader] Found 0x80003448 inside section! val=" << std::hex << (uint32_t)sec.data[i] << std::dec << std::endl;
+            }
         }
         ctx->mmu.write8(sec.address + i, sec.data[i]);
       }
@@ -414,9 +424,11 @@ int main(int argc, char **argv) {
       }
     }
     if (stack_top >= arena_lo && stack_top < 0x81800000) {
-      std::cout << "[Loader] crt stack top 0x" << std::hex << stack_top
-                << " above section end 0x" << arena_lo
-                << ", raising ArenaLo" << std::dec << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+        std::cout << "[Loader] crt stack top 0x" << std::hex << stack_top
+                  << " above section end 0x" << arena_lo
+                  << ", raising ArenaLo" << std::dec << std::endl;
+      }
 
       arena_lo = (stack_top + 0x100 + 31) & ~31u;
     }
@@ -444,8 +456,10 @@ int main(int argc, char **argv) {
     ctx->mmu.write32(0x8000003C, fst_size); 
     if (fst_addr < 0x81700000)
       arena_hi = fst_addr & ~31u;
-    std::cout << "[Loader] FST loaded at 0x" << std::hex << fst_addr
-              << " size 0x" << fst_size << std::dec << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+      std::cout << "[Loader] FST loaded at 0x" << std::hex << fst_addr
+                << " size 0x" << fst_size << std::dec << std::endl;
+    }
   }
 
   // Console type (Dolphin BootManager): Wii retail Hollywood = 0x10000006,
@@ -490,17 +504,21 @@ int main(int argc, char **argv) {
       for (size_t i = 0; i < bi2_data.size(); ++i)
         ctx->mmu.write8(bi2_addr + (uint32_t)i, (uint8_t)bi2_data[i]);
       ctx->mmu.write32(0x800000F4, bi2_addr);
-      std::cout << "[Loader] BI2 loaded at 0x" << std::hex << bi2_addr
-                << std::dec << std::endl;
+      if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+        std::cout << "[Loader] BI2 loaded at 0x" << std::hex << bi2_addr
+                  << std::dec << std::endl;
+      }
     }
 
     
     
     ctx->mmu.write32(0x80000030, arena_lo);
     ctx->mmu.write32(0x80000034, gc_arena_hi);
-    std::cout << "[Loader] GC Arena = 0x" << std::hex << arena_lo << " - 0x"
-              << gc_arena_hi << " (" << std::dec
-              << (gc_arena_hi - arena_lo) / 1024 << " KiB)" << std::endl;
+    if (nwii::runtime::log_on(nwii::runtime::LOG_INFO)) {
+      std::cout << "[Loader] GC Arena = 0x" << std::hex << arena_lo << " - 0x"
+                << gc_arena_hi << " (" << std::dec
+                << (gc_arena_hi - arena_lo) / 1024 << " KiB)" << std::endl;
+    }
   }
   
   ctx->mmu.write32(0x800000F0, mem1_size);
