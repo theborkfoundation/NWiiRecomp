@@ -20,3 +20,7 @@ add_test(NAME ipc_interrupt COMMAND ipc_interrupt_test)
 add_executable(write_gather_test write_gather.cpp)
 target_link_libraries(write_gather_test PRIVATE nwiiruntime)
 add_test(NAME write_gather COMMAND write_gather_test)
+
+add_executable(translator_edge_test translator_edge_test.cpp)
+target_link_libraries(translator_edge_test PRIVATE nwiiruntime)
+add_test(NAME translator_edge COMMAND translator_edge_test)

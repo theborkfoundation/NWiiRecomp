@@ -1514,6 +1514,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                               longjmp(ctx.exception_jmp_buf, 1);
                           }
                           nwii::runtime::hw::pi_intsr &= ~bit_to_clear;
+                          ctx.mmu.clear_reservation();
                           hle_save_context_to_guest(ctx, current_ctx);
                           ctx.dispatch_saved_ctx = current_ctx;
                           ctx.srr0 = ctx.pc;

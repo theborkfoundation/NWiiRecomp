@@ -77,6 +77,27 @@ static inline bool watch_contains(uint32_t paddr) {
 }
 
 // Strict Dolphin-accurate MMU with inlined fast-path
+// PowerPC fctiw/fctiwz. Saturated result for NaN/infinity/out-of-range so the
+// host never performs an undefined float->int conversion; `truncate` selects
+// fctiwz, otherwise the guest FPSCR rounding mode applies.
+inline int32_t guest_fctiw(double v, uint32_t fpscr, bool truncate) {
+  if (std::isnan(v)) return (int32_t)0x80000000;
+  double r;
+  if (truncate) {
+    r = std::trunc(v);
+  } else {
+    switch ((fpscr >> 30) & 3u) {  // RN: 0 nearest, 1 zero, 2 +inf, 3 -inf
+    case 0: r = std::nearbyint(v); break;
+    case 1: r = std::trunc(v); break;
+    case 2: r = std::ceil(v); break;
+    default: r = std::floor(v); break;
+    }
+  }
+  if (r >= 2147483648.0) return (int32_t)0x7FFFFFFF;
+  if (r <= -2147483648.0) return (int32_t)0x80000000;
+  return (int32_t)r;
+}
+
 struct MMU {
   std::vector<uint8_t> mem1;
   std::vector<uint8_t> mem2;
@@ -170,6 +191,27 @@ struct MMU {
   void custom_watch(uint32_t, uint32_t, int) {}
 
   // Slow-path fallback handlers (out-of-line)
+  // PowerPC lwarx/stwcx. reservation: physical 32-byte line. Guest stores
+  // invalidate it, as do interrupt dispatches (seen as context switches).
+  uint32_t reservation_line = 0xFFFFFFFFu;
+
+  __attribute__((always_inline)) inline void set_reservation(uint32_t addr) {
+    reservation_line = (addr & 0x3FFFFFFFu) & ~31u;
+  }
+  __attribute__((always_inline)) inline bool reservation_matches(uint32_t addr) const {
+    return reservation_line != 0xFFFFFFFFu &&
+           (((addr & 0x3FFFFFFFu) & ~31u) == reservation_line);
+  }
+  __attribute__((always_inline)) inline void clear_reservation() {
+    reservation_line = 0xFFFFFFFFu;
+  }
+  __attribute__((always_inline)) inline void note_store(uint32_t addr) {
+    if (__builtin_expect(reservation_line != 0xFFFFFFFFu, 0)) {
+      if ((((addr & 0x3FFFFFFFu)) & ~31u) == reservation_line)
+        reservation_line = 0xFFFFFFFFu;
+    }
+  }
+
   __attribute__((noinline)) uint8_t read8_slow(uint32_t paddr) const {
     if (is_hw_reg(paddr)) {
       uint32_t val = HW_Reg_Read32(paddr & ~3);
@@ -235,6 +277,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write8(uint32_t addr, uint8_t value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       if (watch_contains(paddr))
@@ -269,6 +312,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write16(uint32_t addr, uint16_t value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       if (watch_contains(paddr))
@@ -306,6 +350,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write32(uint32_t addr, uint32_t value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       if (watch_contains(paddr))
@@ -353,6 +398,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write_f32(uint32_t addr, float value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       uint32_t v;
@@ -395,6 +441,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write64(uint32_t addr, uint64_t value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       if (watch_contains(paddr))
@@ -437,6 +484,7 @@ struct MMU {
   }
 
   __attribute__((always_inline)) inline void write_f64(uint32_t addr, double value) {
+    note_store(addr);
     uint32_t paddr = addr & 0x3FFFFFFF;
     if (__builtin_expect(g_watch_addr != 0, 0)) {
       uint64_t v;

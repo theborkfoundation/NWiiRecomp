@@ -360,14 +360,18 @@ bool interpret_one(CPUContext& ctx) {
         case 215: ctx.mmu.write8(ea_ra0(0) + ctx.gpr[rB], (uint8_t)ctx.gpr[rD]); break; 
         case 407: ctx.mmu.write16(ea_ra0(0) + ctx.gpr[rB], (uint16_t)ctx.gpr[rD]); break; 
         case 20: { 
-            ctx.gpr[rD] = ctx.mmu.read32(ea_ra0(0) + ctx.gpr[rB]);
-            ctx.reservation_addr = ea_ra0(0) + ctx.gpr[rB];
+            const uint32_t ea = ea_ra0(0) + ctx.gpr[rB];
+            ctx.gpr[rD] = ctx.mmu.read32(ea);
+            ctx.mmu.set_reservation(ea);
             break;
         }
         case 150: { 
-            ctx.mmu.write32(ea_ra0(0) + ctx.gpr[rB], ctx.gpr[rD]);
+            const uint32_t ea = ea_ra0(0) + ctx.gpr[rB];
+            const bool ok = ctx.mmu.reservation_matches(ea);
+            if (ok) ctx.mmu.write32(ea, ctx.gpr[rD]);
+            ctx.mmu.clear_reservation();
             ctx.cr[0].lt = ctx.cr[0].gt = false;
-            ctx.cr[0].eq = true;
+            ctx.cr[0].eq = ok;
             ctx.cr[0].so = (ctx.xer >> 31) & 1;
             break;
         }
