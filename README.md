@@ -66,7 +66,10 @@ NWiiRecomp/
   including the time base (`mftb`) and decrementer (`mtdec`/`mfdec`).
 - Implements paired-singles (SIMD) with GQR-based quantization scales mapped to C++ intrinsics.
 - Tail-call detection and `goto`-based local branch inlining.
-- Mid-function entry point dispatch via `switch(ctx.pc)`.
+- Mid-function entry point dispatch through a compact table of instruction
+  label offsets (a switch is kept only for sparse analyzer artifacts), so
+  callbacks, interrupts, indirect branches and restored thread contexts can
+  resume at any instruction.
 - Per-game HLE hooks from `[hle_hooks]` in the config TOML; the recompiler
   itself contains no game-specific addresses.
 - Functions that are all zeroes in the DOL (filled with code at runtime)
@@ -119,12 +122,18 @@ NWiiRecomp/
 
 ## Building
 
-**Requirements:** CMake 3.20+, a C++20 compiler, internet access (SDL2 is fetched automatically).
+**Requirements:** CMake 3.20+, GCC or Clang with C++20 (generated code uses
+GNU label addresses for mid-function resume), internet access (SDL2 is fetched
+automatically).
 
 ```bash
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
+
+Generated code is not usable without optimization, so use a Release build (or
+`--config Release` with a multi-config generator) for any performance
+measurement.
 
 ---
 
@@ -134,10 +143,12 @@ cmake --build build -j$(nproc)
 # 1. Analyze and recompile the game (paths and options come from the TOML)
 ./build/nWiiRecomp/nwiirecomp config.toml
 
-# 2. Build the generated project
+# 2. Build the generated project (Release unless you choose otherwise)
 cd export
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j12
+# Multi-config generators (Xcode, Visual Studio):
+# cmake --build build --config Release
 
 # 3. Run with the extracted game directory
 cd ..

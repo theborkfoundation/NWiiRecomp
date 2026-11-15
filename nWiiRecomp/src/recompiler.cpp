@@ -105,6 +105,13 @@ static std::string effective_handler(const analyzer::Function &func,
 }
 
 
+// Eight-digit uppercase hex, matching the loc_<address> label format.
+static std::string hex8(uint32_t value) {
+  std::stringstream ss;
+  ss << std::hex << std::uppercase << std::setfill('0') << std::setw(8) << value;
+  return ss.str();
+}
+
 std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
   std::vector<std::string> generated_files;
 
@@ -123,6 +130,16 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     out << "#include <iostream>\n";
     out << "#include <cstdlib>\n\n";
     out << "using namespace nwii::runtime;\n\n";
+    // Resume dispatch tables store label addresses as offsets from
+    // loc_resume_body. Taking a label's address is a GNU extension supported by
+    // GCC and Clang; every supported host compiler provides it. The offsets are
+    // signed because the compiler may lay the base block out after some of the
+    // instruction blocks.
+    out << "#define NWII_RESUME_LOC(A) (int32_t)((const char*)&&loc_##A - "
+           "(const char*)&&loc_resume_body)\n";
+    out << "#define NWII_RESUME_DEFAULT "
+           "(int32_t)((const char*)&&loc_resume_default - "
+           "(const char*)&&loc_resume_body)\n\n";
   };
 
   // Split output is the only supported mode: the legacy single-file path
@@ -262,27 +279,40 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     int file_idx = 0;
     int func_idx = 0;
     int count_in_current_file = 0;
-    std::ofstream out;
+    int functions_in_current_file = 0;
+    std::ostringstream unit_body;
+    std::set<std::string> unit_declarations;
+
+    // Each split unit declares only the functions it defines or calls. The
+    // complete guest declaration list (functions.h) is 1.5 MB and every unit
+    // used to parse it; only main_output.cpp still needs all of it.
+    auto flush_unit = [&]() {
+      std::stringstream ss;
+      ss << "output_" << file_idx++ << ".cpp";
+      std::string fname = ss.str();
+      generated_files.push_back(fname);
+      std::ofstream out(config_.output_dir + "/" + fname);
+      emit_headers(out);
+      // Definitions in this unit must see a C-linkage declaration first, and
+      // cross-unit calls are declared here instead of through functions.h.
+      out << "extern \"C\" {\n";
+      for (const auto &name : unit_declarations)
+        out << "void " << name << "(CPUContext&);\n";
+      out << "}\n\n";
+      out << unit_body.str();
+      out.close();
+      std::cout << "[Recompiler] Generated " << fname << "\n";
+      unit_body.str("");
+      unit_body.clear();
+      unit_declarations.clear();
+      functions_in_current_file = 0;
+    };
 
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
-      if (count_in_current_file == 0) {
-        if (out.is_open()) {
-          out.close();
-          std::cout << "[Recompiler] Generated " << generated_files.back()
-                    << "\n";
-        }
-        std::stringstream ss;
-        ss << "output_" << file_idx++ << ".cpp";
-        std::string fname = ss.str();
-        generated_files.push_back(fname);
-        out.open(config_.output_dir + "/" + fname);
-        emit_headers(out);
-        out << "#include \"functions.h\"\n\n";
-      }
-
       std::string func_name = all_func_names[func_idx];
       const std::string &base_name = all_base_names[func_idx++];
       const bool structural_hle = !auto_hle_handler(func, base_name).empty();
+      unit_declarations.insert(func_name);
       if (structural_hle) {
         const std::string hle_handler =
             effective_handler(func, base_name, config_);
@@ -290,26 +320,36 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
         // equals the handler name no wrapper can be emitted; those functions
         // are addressed by their runtime symbol directly.
         if (hle_handler != func_name) {
-          out << "void " << func_name << "(nwii::runtime::CPUContext& ctx) {\n";
-          out << "    extern void " << hle_handler
-              << "(nwii::runtime::CPUContext&);\n";
-          out << "    " << hle_handler << "(ctx);\n";
-          out << "    ctx.pc = ctx.lr;\n";
-          out << "}\n\n";
+          unit_body
+              << "void " << func_name << "(nwii::runtime::CPUContext& ctx) {\n";
+          if (!configured_hook(func, config_).empty()) {
+            // Configured hooks are ordinary C++ functions.
+            unit_body << "    extern void " << hle_handler
+                      << "(nwii::runtime::CPUContext&);\n";
+          } else {
+            // Runtime HLE handlers have C linkage; declare them at file scope
+            // (block-scope extern "C" is not accepted by Clang).
+            unit_declarations.insert(hle_handler);
+          }
+          unit_body << "    " << hle_handler << "(ctx);\n";
+          unit_body << "    ctx.pc = ctx.lr;\n";
+          unit_body << "}\n\n";
         }
       } else {
-        emit_function(out, func, func_name);
+        emit_function(unit_body, func, func_name, &unit_declarations);
       }
 
+      ++functions_in_current_file;
       count_in_current_file += func.instructions.size();
       if (count_in_current_file >= config_.instructions_per_file) {
+        flush_unit();
         count_in_current_file = 0;
       }
     }
-    if (out.is_open()) {
-      out.close();
-      std::cout << "[Recompiler] Generated " << generated_files.back() << "\n";
-    }
+    if (functions_in_current_file > 0)
+      flush_unit();
+
+    std::ofstream out;
 
     std::string main_name = "main_output.cpp";
     generated_files.push_back(main_name);
@@ -347,6 +387,10 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
       if (is_hle)
         continue;
       uint32_t hi = func.end_address;
+      std::unordered_set<uint32_t> function_addresses;
+      function_addresses.reserve(func.instructions.size());
+      for (const auto &inst : func.instructions)
+        function_addresses.insert(inst.address);
       for (const auto &inst : func.instructions) {
         ppc::Instruction ppc_inst(inst.opcode);
         if (ppc_inst.is_branch_link() || ppc_inst.opcode() == 17) {
@@ -356,10 +400,7 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
         }
         if (ppc_inst.opcode() == 16 || ppc_inst.opcode() == 18) {
           uint32_t t = ppc_inst.branch_target(inst.address);
-          bool is_local =
-              std::find_if(func.instructions.begin(), func.instructions.end(),
-                           [t](const auto &i) { return i.address == t; }) !=
-              func.instructions.end();
+          bool is_local = function_addresses.count(t) != 0;
           if (t <= inst.address && is_local && inst.address + 4 > hi)
             hi = inst.address + 4;
         }
@@ -569,9 +610,20 @@ bool Recompiler::generate_cmake_project(uint32_t entry_point) {
 
   
   out << "project(" << config_.project_name << " LANGUAGES C CXX)\n\n";
+  // Generated code carries per-instruction bookkeeping and large dispatch
+  // structures, so an unoptimized build is dramatically slower. Default to
+  // Release only for single-config generators and only when the user has not
+  // chosen a build type; multi-config generators select the config at build
+  // time and must keep CMAKE_BUILD_TYPE empty.
+  out << "if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n";
+  out << "    set(CMAKE_BUILD_TYPE Release CACHE STRING \"Build type\" FORCE)\n";
+  out << "endif()\n\n";
   out << "set(CMAKE_POLICY_VERSION_MINIMUM 3.5)\n";
   out << "set(CMAKE_CXX_STANDARD 20)\n";
-  out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+  out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+  // Translated functions resume at interior PCs through a table of label
+  // addresses, which is a GCC/Clang extension.
+  out << "set(CMAKE_CXX_EXTENSIONS ON)\n\n";
 
   
   
@@ -630,6 +682,16 @@ bool Recompiler::generate_cmake_project(uint32_t entry_point) {
 std::string Recompiler::generate_function_cpp(const analyzer::Function &func) {
   std::stringstream ss;
 
+  // Standalone bodies (tests, Studio preview) do not come with the unit
+  // preamble, so provide the resume-dispatch macros here as well.
+  ss << "#ifndef NWII_RESUME_LOC\n";
+  ss << "#define NWII_RESUME_LOC(A) (int32_t)((const char*)&&loc_##A - "
+        "(const char*)&&loc_resume_body)\n";
+  ss << "#define NWII_RESUME_DEFAULT "
+        "(int32_t)((const char*)&&loc_resume_default - "
+        "(const char*)&&loc_resume_body)\n";
+  ss << "#endif\n\n";
+
   std::string func_name;
   if (symbols_ && symbols_->has_symbol(func.start_address)) {
     func_name = symbols_->get_symbol(func.start_address);
@@ -646,7 +708,8 @@ std::string Recompiler::generate_function_cpp(const analyzer::Function &func) {
 
 void Recompiler::emit_function(std::ostream &out,
                                const analyzer::Function &func,
-                               const std::string &func_name) {
+                               const std::string &func_name,
+                               std::set<std::string> *cross_refs) {
   out << "void " << func_name << "(CPUContext& ctx) {\n";
 
   // Explicit [hle_hooks] configuration replaces the guest body. Non-auto-HLE
@@ -699,49 +762,88 @@ void Recompiler::emit_function(std::ostream &out,
       << ") nwii::runtime::trace_call(0x" << std::hex << std::uppercase
       << func.start_address << std::dec << ", ctx);\n";
 
-  std::set<uint32_t> valid_addrs;
+  std::unordered_set<uint32_t> valid_addrs;
+  valid_addrs.reserve(func.instructions.size());
+  uint32_t last_addr = func.start_address;
   for (const auto &inst : func.instructions) {
     valid_addrs.insert(inst.address);
+    if (inst.address > last_addr)
+      last_addr = inst.address;
   }
 
+  // Guest code can re-enter a function at any instruction: callbacks and
+  // interrupts save the current PC, indirect branches (jump tables) and
+  // restored thread contexts can all name an interior address.
+  //
+  // For a dense address range the resume dispatch is one table slot per
+  // instruction. A slot holds the signed offset from loc_resume_body to its
+  // label, which is a compile-time constant, so the table needs no relocations
+  // and costs far less to compile than a switch with one case per instruction.
+  // A sparse function (a handful of instructions across a large address span)
+  // keeps the switch: its table would be huge and its case count tiny.
   if (valid_addrs.size() > 1) {
-    out << "    if (ctx.pc != 0x" << std::hex << std::uppercase
-        << func.start_address << std::dec << ") {\n";
-    out << "        switch (ctx.pc) {\n";
-    for (uint32_t addr : valid_addrs) {
-      if (addr != func.start_address) {
-        out << "            case 0x" << std::hex << std::uppercase << addr
-            << std::dec << ": goto loc_" << std::hex << std::uppercase << addr
-            << std::dec << ";\n";
+    const uint32_t start = func.start_address;
+    const size_t span_slots = (last_addr - start) / 4 + 1;
+    if (span_slots <= valid_addrs.size() * 2 + 8) {
+      out << "    if (ctx.pc != 0x" << hex8(start) << "u) {\n";
+      out << "        static const int32_t resume_offset[] = {\n";
+      out << "            NWII_RESUME_DEFAULT,\n";
+      for (uint32_t addr = start + 4; addr <= last_addr; addr += 4) {
+        if (valid_addrs.count(addr))
+          out << "            NWII_RESUME_LOC(" << hex8(addr) << "),\n";
+        else
+          out << "            NWII_RESUME_DEFAULT,\n";
       }
+      out << "        };\n";
+      out << "        const uint32_t delta = ctx.pc - 0x" << hex8(start)
+          << "u;\n";
+      out << "        if (delta < sizeof(resume_offset) && (delta & 3u) == 0)\n";
+      out << "            goto *(void*)((const char*)&&loc_resume_body + "
+             "resume_offset[delta >> 2]);\n";
+      out << "        if (ctx.pc == 0) return; // idle: no runnable thread\n";
+      out << "        nwii::runtime::interpret_step(ctx);\n";
+      out << "        return;\n";
+      out << "    }\n";
+      out << "    goto loc_resume_body;\n";
+      out << "loc_resume_default:\n";
+      out << "    nwii::runtime::interpret_step(ctx);\n";
+      out << "    return;\n";
+      out << "loc_resume_body: ;\n";
+    } else {
+      out << "    if (ctx.pc != 0x" << std::hex << std::uppercase << start
+          << std::dec << ") {\n";
+      out << "        switch (ctx.pc) {\n";
+      for (uint32_t addr : valid_addrs) {
+        if (addr != start) {
+          out << "            case 0x" << std::hex << std::uppercase << addr
+              << std::dec << ": goto loc_" << hex8(addr) << ";\n";
+        }
+      }
+      out << "            case 0x0: return; // idle: no runnable thread\n";
+      out << "            default: nwii::runtime::interpret_step(ctx); return;\n";
+      out << "        }\n";
+      out << "    }\n";
     }
-    out << "            case 0x0: return; // idle: no runnable thread\n";
-
-    
-    
-    out << "            default: nwii::runtime::interpret_step(ctx); return;\n";
-    out << "        }\n";
-    out << "    }\n";
-
   }
   for (const auto &inst : func.instructions) {
 
     
 
     
-    emit_instruction(out, inst, func);
+    emit_instruction(out, inst, func, valid_addrs, cross_refs);
   }
 
   out << "}\n\n";
 }
 
-void Recompiler::emit_instruction(std::ostream &out,
-                                  const analyzer::Instruction &inst,
-                                  const analyzer::Function &func) {
+void Recompiler::emit_instruction(
+    std::ostream &out, const analyzer::Instruction &inst,
+    const analyzer::Function &func,
+    const std::unordered_set<uint32_t> &instruction_addresses,
+    std::set<std::string> *cross_refs) {
   ppc::Instruction ppc_inst(inst.opcode);
 
-  out << "loc_" << std::hex << std::uppercase << inst.address << std::dec
-      << ": ;\n";
+  out << "loc_" << hex8(inst.address) << ": ;\n";
   out << "    ++ctx.inst_count;\n";
   out << "    // 0x" << std::hex << std::setfill('0') << std::setw(8)
       << inst.address << ": ";
@@ -977,14 +1079,9 @@ void Recompiler::emit_instruction(std::ostream &out,
       target = inst.address + bd;
     }
 
-    std::stringstream ss;
-    ss << "loc_" << std::hex << std::uppercase << target;
-    std::string target_lbl = ss.str();
+    std::string target_lbl = "loc_" + hex8(target);
 
-    bool is_local =
-        std::find_if(func.instructions.begin(), func.instructions.end(),
-                     [target](const auto &i) { return i.address == target; }) !=
-        func.instructions.end();
+    bool is_local = instruction_addresses.count(target) != 0;
 
     if (target <= inst.address && is_local) {
 
@@ -1066,6 +1163,8 @@ void Recompiler::emit_instruction(std::ostream &out,
         }
       }
       if (is_mapped) {
+        if (cross_refs)
+          cross_refs->insert(ext_name);
         if (cond_expr == "true") {
           out << "    ctx.pc = 0x" << std::hex << std::uppercase << target
               << std::dec << "; " << ext_name << "(ctx); return;\n";
@@ -1087,13 +1186,9 @@ void Recompiler::emit_instruction(std::ostream &out,
   } else if (ppc_inst.opcode() == 18) {
     
     uint32_t target = ppc_inst.branch_target(inst.address);
-    std::stringstream ss;
     std::string target_name;
 
-    bool is_local =
-        std::find_if(func.instructions.begin(), func.instructions.end(),
-                     [target](const auto &i) { return i.address == target; }) !=
-        func.instructions.end();
+    bool is_local = instruction_addresses.count(target) != 0;
 
     if (target <= inst.address && is_local) {
 
@@ -1122,8 +1217,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.lr = 0x" << std::hex << std::uppercase
           << (inst.address + 4) << std::dec << "; // save return address\n";
       if (is_local) {
-        out << "    goto loc_" << std::hex << std::uppercase
-            << std::setfill('0') << std::setw(8) << target << ";\n";
+        out << "    goto loc_" << hex8(target) << ";\n";
       } else {
         bool is_mapped = true;
         if (!symbols_ || !symbols_->has_symbol(target)) {
@@ -1133,6 +1227,8 @@ void Recompiler::emit_instruction(std::ostream &out,
           }
         }
         if (is_mapped) {
+          if (cross_refs)
+            cross_refs->insert(target_name);
           out << "    ctx.pc = 0x" << std::hex << std::uppercase << target
               << std::dec << "; ";
           out << target_name << "(ctx);\n";
@@ -1151,8 +1247,7 @@ void Recompiler::emit_instruction(std::ostream &out,
       }
     } else {
       if (is_local) {
-        out << "    goto loc_" << std::hex << std::uppercase
-            << std::setfill('0') << std::setw(8) << target << ";\n";
+        out << "    goto loc_" << hex8(target) << ";\n";
       } else {
         bool is_mapped = true;
         if (!symbols_ || !symbols_->has_symbol(target)) {

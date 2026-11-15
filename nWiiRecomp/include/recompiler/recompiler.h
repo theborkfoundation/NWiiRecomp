@@ -2,7 +2,9 @@
 #include "analyzer/analyzer.h"
 #include "recompiler/symbols.h"
 #include <map>
+#include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace nwii {
@@ -45,8 +47,13 @@ public:
     std::string generate_function_cpp(const analyzer::Function& func);
 
 private:
-    void emit_function(std::ostream& out, const analyzer::Function& func, const std::string& func_name);
-    void emit_instruction(std::ostream& out, const analyzer::Instruction& inst, const analyzer::Function& func);
+    void emit_function(std::ostream& out, const analyzer::Function& func,
+                       const std::string& func_name,
+                       std::set<std::string>* cross_refs = nullptr);
+    void emit_instruction(std::ostream& out, const analyzer::Instruction& inst,
+                          const analyzer::Function& func,
+                          const std::unordered_set<uint32_t>& instruction_addresses,
+                          std::set<std::string>* cross_refs);
 
     const analyzer::Analyzer& analyzer_;
     const SymbolTable* symbols_;

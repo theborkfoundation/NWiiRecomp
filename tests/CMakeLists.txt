@@ -24,3 +24,25 @@ add_test(NAME write_gather COMMAND write_gather_test)
 add_executable(translator_edge_test translator_edge_test.cpp)
 target_link_libraries(translator_edge_test PRIVATE nwiiruntime)
 add_test(NAME translator_edge COMMAND translator_edge_test)
+
+add_executable(recompiler_resume_generator recompiler_resume_generator.cpp)
+target_link_libraries(recompiler_resume_generator PRIVATE nwiirecomp_lib)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/recompiler_resume.inc"
+    COMMAND recompiler_resume_generator "${CMAKE_CURRENT_BINARY_DIR}/recompiler_resume.inc"
+    DEPENDS recompiler_resume_generator
+    VERBATIM)
+add_executable(recompiler_resume_test recompiler_resume_test.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/recompiler_resume.inc")
+target_include_directories(recompiler_resume_test PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/nWiiRuntime/include")
+target_link_libraries(recompiler_resume_test PRIVATE nwiiruntime)
+# Compile the generated body optimized: block layout and therefore the sign of
+# the resume-table offsets differ from an unoptimized build.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(recompiler_resume_test PRIVATE -O2)
+endif()
+add_test(NAME recompiler_resume COMMAND recompiler_resume_test)
+
+add_executable(recompiler_cmake_test recompiler_cmake_test.cpp)
+target_link_libraries(recompiler_cmake_test PRIVATE nwiirecomp_lib)
+add_test(NAME recompiler_cmake COMMAND recompiler_cmake_test)
