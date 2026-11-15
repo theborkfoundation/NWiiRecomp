@@ -21,7 +21,10 @@ int main(int argc, char** argv) {
         config.runtime_source_dir = tbl["runtime_source_dir"].value_or("../nWiiRuntime");
         config.symbols_csv = tbl["symbols_csv"].value_or("");
         
-        config.split_output = tbl["split_output"].value_or(false);
+        if (auto split = tbl["split_output"].value<bool>(); split && !*split)
+            std::cout << "[Recompiler] split_output = false is no longer "
+                         "supported; using split output.\n";
+        config.split_output = true;
         config.instructions_per_file = tbl["instructions_per_file"].value_or(20000);
 
         if (auto patches = tbl["instruction_overrides"].as_table()) {

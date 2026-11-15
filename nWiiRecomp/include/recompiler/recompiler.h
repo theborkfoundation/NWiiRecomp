@@ -15,7 +15,9 @@ struct RecompilerConfig {
     std::string runtime_source_dir = "../nWiiRuntime";
     std::string symbols_csv = "";
 
-    bool split_output = false;
+    // Legacy single-file output was removed; kept so existing configs still
+    // parse. Split output is always used.
+    bool split_output = true;
     int instructions_per_file = 20000;
 
     
