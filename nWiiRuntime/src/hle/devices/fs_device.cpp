@@ -125,7 +125,22 @@ static std::vector<uint8_t> make_setting_txt() {
     return std::vector<uint8_t>(txt, txt + strlen(txt));
 }
 
-static static std::string host_save_dir();
+static std::string host_save_dir();
+
+// Title data directory for the configured game (e.g. SOJE41 ->
+// /title/00010000/534f4a45/data). Derived from the game ID instead of being
+// hard-coded so other titles get their own directory.
+static std::string title_data_rel() {
+    const std::string id = nwii::runtime::Config::get().game_id;
+    if (id.size() < 4) return {};
+    const uint32_t low = ((uint32_t)(uint8_t)id[0] << 24) |
+                         ((uint32_t)(uint8_t)id[1] << 16) |
+                         ((uint32_t)(uint8_t)id[2] << 8) |
+                         (uint32_t)(uint8_t)id[3];
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "title/00010000/%08x/data", low);
+    return buf;
+}
 
 void vnand_init() {
     if (g_vnand_init) return;
@@ -135,14 +150,13 @@ void vnand_init() {
     g_vnand_files.push_back({"/title/00000001/00000002/data/play_rec.dat", std::vector<uint8_t>(0x20, 0)});
     g_vnand_files.push_back({"/shared2/test2/dvderror.dat", std::vector<uint8_t>(4, 0)});
 
-    // The game saves to /title/00010000/<low title id>/data/slot_N.sav. Create
-    // the host-backed directory up front so ISFS_GetAttr sees the title data
-    // directory and the game does not fall back to /tmp + root staging.
-    std::error_code ec;
-    std::filesystem::create_directories(
-        std::filesystem::path(host_save_dir()) /
-            "title/00010000/534f4a45/data",
-        ec);
+    // Create this title's host-backed data directory up front so ISFS_GetAttr
+    // sees it and the game does not fall back to /tmp + root staging.
+    if (const std::string rel = title_data_rel(); !rel.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(host_save_dir()) / rel, ec);
+    }
 }
 
 // Host-backed files for writable guest paths (/tmp/slot_N.sav etc.). The
@@ -156,6 +170,12 @@ struct HostHandle {
     bool open = false;
 };
 static HostHandle g_host_handles[HOST_FD_MAX];
+
+// ISFS /dev/fs error codes (WiiBrew).
+constexpr int32_t ISFS_EINVAL = -101;
+constexpr int32_t ISFS_EACCES = -102;
+constexpr int32_t ISFS_EIO    = -103;
+constexpr int32_t ISFS_ENOENT = -106;
 
 static std::string host_save_dir() {
     std::string root;
@@ -317,7 +337,9 @@ public:
         if (slot >= 0 && slot < VNAND_FD_MAX && g_vnand_handles[slot].open) {
             auto& h = g_vnand_handles[slot];
             auto& f = g_vnand_files[h.file_idx];
-            uint32_t avail = f.data.size() - h.pos;
+            if (h.pos >= f.data.size())
+                return 0; // read at or beyond EOF
+            uint32_t avail = (uint32_t)(f.data.size() - h.pos);
             uint32_t to_read = std::min(len, avail);
 
             uint32_t virt_ptr = buf;
@@ -396,18 +418,27 @@ public:
         if (slot >= 0 && slot < VNAND_FD_MAX && g_vnand_handles[slot].open) {
             auto& h = g_vnand_handles[slot];
             auto& f = g_vnand_files[h.file_idx];
-            if (whence == 0) h.pos = offset; 
-            else if (whence == 1) h.pos += offset; 
-            else if (whence == 2) h.pos = f.data.size() + offset; 
-            return h.pos;
+            int64_t np = 0;
+            if (whence == 0) np = offset;
+            else if (whence == 1) np = (int64_t)h.pos + offset;
+            else if (whence == 2) np = (int64_t)f.data.size() + offset;
+            else return ISFS_EINVAL;
+            // Seeking past EOF is legal; negative or unrepresentable results
+            // are rejected so a later read cannot wrap the remaining length.
+            if (np < 0 || np > 0x7FFFFFFFll)
+                return ISFS_EINVAL;
+            h.pos = (uint32_t)np;
+            return (int32_t)h.pos;
         }
         int hs = (int)fd - HOST_FD_BASE;
         if (hs >= 0 && hs < HOST_FD_MAX && g_host_handles[hs].open) {
             int whence_f = (whence == 0) ? SEEK_SET : (whence == 1) ? SEEK_CUR : SEEK_END;
-            std::fseek(g_host_handles[hs].f, offset, whence_f);
-            return (int32_t)std::ftell(g_host_handles[hs].f);
+            if (std::fseek(g_host_handles[hs].f, offset, whence_f) != 0)
+                return ISFS_EINVAL;
+            const long pos = std::ftell(g_host_handles[hs].f);
+            return pos < 0 ? ISFS_EINVAL : (int32_t)pos;
         }
-        return IPC_OK;
+        return ISFS_EINVAL;
     }
 
     int32_t ioctl(CPUContext& ctx, const IpcRequest& req) override {
@@ -417,12 +448,14 @@ public:
         if (req.ioctl_cmd == 0x03) { // CreateDir (owner/group + 0x40 name + perms)
             std::string path = guest_path_at(ctx, req.in_buf + 6);
             const std::string hp = host_path_for(path);
-            if (!hp.empty()) {
-                std::error_code ec;
-                std::filesystem::create_directories(hp, ec);
-            }
-            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] CreateDir " << path << std::endl;
-            return IPC_OK;
+            if (hp.empty())
+                return ISFS_EINVAL;
+            std::error_code ec;
+            std::filesystem::create_directories(hp, ec);
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] CreateDir " << path << (ec ? " FAILED" : "")
+                          << std::endl;
+            return ec ? ISFS_EACCES : IPC_OK;
         }
         if (req.ioctl_cmd == 0x06) { // GetAttr
             std::string path = guest_path_at(ctx, req.in_buf);
@@ -434,27 +467,41 @@ public:
         if (req.ioctl_cmd == 0x07) { // Delete
             std::string path = guest_path_at(ctx, req.in_buf);
             const std::string hp = host_path_for(path);
-            if (!hp.empty()) { std::error_code ec; std::filesystem::remove(hp, ec); }
-            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] Delete " << path << std::endl;
-            return IPC_OK;
+            if (hp.empty())
+                return ISFS_EINVAL;
+            std::error_code ec;
+            if (!std::filesystem::exists(hp, ec))
+                return ISFS_ENOENT;
+            std::filesystem::remove(hp, ec);
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] Delete " << path << (ec ? " FAILED" : "")
+                          << std::endl;
+            return ec ? ISFS_EIO : IPC_OK;
         }
         if (req.ioctl_cmd == 0x08) { // Rename
             std::string a = guest_path_at(ctx, req.in_buf);
             std::string b = guest_path_at(ctx, req.in_buf + 64);
             const std::string ha = host_path_for(a), hb = host_path_for(b);
-            if (!ha.empty() && !hb.empty()) {
-                std::error_code ec;
-                std::filesystem::create_directories(std::filesystem::path(hb).parent_path(), ec);
-                std::filesystem::rename(ha, hb, ec);
-            }
-            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] Rename " << a << " -> " << b << std::endl;
-            return IPC_OK;
+            if (ha.empty() || hb.empty())
+                return ISFS_EINVAL;
+            std::error_code ec;
+            if (!std::filesystem::exists(ha, ec))
+                return ISFS_ENOENT;
+            std::filesystem::create_directories(
+                std::filesystem::path(hb).parent_path(), ec);
+            std::filesystem::rename(ha, hb, ec);
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] Rename " << a << " -> " << b
+                          << (ec ? " FAILED" : "") << std::endl;
+            return ec ? ISFS_EIO : IPC_OK;
         }
         if (req.ioctl_cmd == 0x09) { // CreateFile
             std::string path = guest_path_at(ctx, req.in_buf + 6);
             bool ok = create_host_file(path, false);
-            if (std::getenv("NWII_DEBUG")) std::cout << "[FS] CreateFile " << path << " -> " << (ok ? "OK" : "FAIL") << std::endl;
-            return ok ? IPC_OK : IPC_ENOENT;
+            if (std::getenv("NWII_DEBUG"))
+                std::cout << "[FS] CreateFile " << path << " -> "
+                          << (ok ? "OK" : "FAIL") << std::endl;
+            return ok ? IPC_OK : ISFS_EIO;
         }
         if (req.ioctl_cmd == 0x0B) { // GetFileStats (size, seek)
             uint32_t size = 0, pos = 0;

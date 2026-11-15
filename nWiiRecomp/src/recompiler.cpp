@@ -1988,9 +1988,13 @@ void Recompiler::emit_instruction(std::ostream &out,
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
       }
     } else if (xo == 491) {
-      out << "    if (ctx.gpr[" << rB << "] != 0) ctx.gpr[" << rD
-          << "] = (uint32_t)((int32_t)ctx.gpr[" << rA << "] / (int32_t)ctx.gpr["
-          << rB << "]); // divw\n";
+      out << "    if (ctx.gpr[" << rB << "] != 0) {\n";
+      out << "      const int32_t a = (int32_t)ctx.gpr[" << rA
+          << "], b = (int32_t)ctx.gpr[" << rB << "];\n";
+      out << "      ctx.gpr[" << rD
+          << "] = (uint32_t)((a == INT32_MIN && b == -1) ? INT32_MIN : a / b); "
+             "// divw (PPC wraps the overflow case)\n";
+      out << "    }\n";
       if (ppc_inst.value() & 1) {
         out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
@@ -2355,9 +2359,13 @@ void Recompiler::emit_instruction(std::ostream &out,
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
       }
     } else if (xo == 1019) { 
-      out << "    ctx.gpr[" << rD << "] = (ctx.gpr[" << rB
-          << "] != 0) ? (uint32_t)((int32_t)ctx.gpr[" << rA
-          << "] / (int32_t)ctx.gpr[" << rB << "]) : 0; // divw\n";
+      out << "    {\n";
+      out << "      const int32_t a = (int32_t)ctx.gpr[" << rA
+          << "], b = (int32_t)ctx.gpr[" << rB << "];\n";
+      out << "      ctx.gpr[" << rD
+          << "] = (b != 0) ? (uint32_t)((a == INT32_MIN && b == -1) ? INT32_MIN "
+             ": a / b) : 0; // divw\n";
+      out << "    }\n";
       if (ppc_inst.value() & 1) {
         out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
