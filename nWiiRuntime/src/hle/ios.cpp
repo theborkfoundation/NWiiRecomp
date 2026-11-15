@@ -1445,7 +1445,19 @@ bool process_pending_callbacks(CPUContext &ctx) {
                           static const bool s_via_exc =
                               std::getenv("NWII_NO_PI_EXC") == nullptr ||
                               std::getenv("NWII_PI_VIA_EXC") != nullptr;
-                          if (s_via_exc) {
+                          // Use the faithful exception entry only while the
+                          // guest is parked (idle loop / idle thread). That is
+                          // where a lost wakeup strands READY threads and
+                          // deadlocks the game (boot stalls, random gameplay
+                          // hangs). During active rendering keep the legacy
+                          // direct dispatch: the exception stub perturbs frame
+                          // pacing and makes 2D UI composite stale positions.
+                          const uint32_t cur_th = ctx.mmu.read32(0x800000E4);
+                          const bool idle_thread =
+                              cur_th != 0 &&
+                              ctx.mmu.read32(cur_th + 0x2D0) == 31 &&
+                              ctx.mmu.read16(cur_th + 0x2C8) == 2;
+                          if (s_via_exc && (ctx.pc == 0x80006CCC || idle_thread)) {
                               // Faithful path: enter the guest's exception-4
                               // stub (0x8009B3D0) which finishes saving the
                               // registers and calls __OSDispatchInterrupt. The

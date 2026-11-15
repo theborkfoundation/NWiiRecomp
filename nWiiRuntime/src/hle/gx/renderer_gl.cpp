@@ -253,9 +253,31 @@ static bool CurrentIsPerspective() {
 }
 
 static void ApplyZMode() {
+  // NWII_OLD_ZMODE: pre-ZMode behaviour (depth on for perspective, writes
+  // always enabled). Diagnostic A/B for occlusion regressions.
+  static const bool old_zmode = std::getenv("NWII_OLD_ZMODE") != nullptr;
+  if (old_zmode) {
+    if (CurrentIsPerspective()) {
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_LEQUAL);
+    } else {
+      glDisable(GL_DEPTH_TEST);
+    }
+    glDepthMask(GL_TRUE);
+    return;
+  }
   if (nwii::runtime::gxdbg::no_depth) {
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
+    return;
+  }
+  // Orthographic (screen-space/2D) draws: keep the pre-ZMode behaviour of
+  // bypassing depth entirely. The game enables ZMode for these quads too, but
+  // our ortho depth mapping is not faithful enough and stale depth can drop or
+  // displace UI/text quads.
+  if (!CurrentIsPerspective()) {
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
     return;
   }
   const auto &z = g_state.zMode;
@@ -264,7 +286,12 @@ static void ApplyZMode() {
                                  GL_GEQUAL, GL_ALWAYS};
   if (z.enable) {
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(cmp[z.func & 7]);
+    // GX's LESS and LEQUAL both mean "nearer wins". Our projection has been
+    // tuned against GL_LEQUAL, so keep LEQUAL for the less-than family instead
+    // of passing GL_LESS, which quantises coplanar surfaces into z-fighting
+    // flicker. NEVER/ALWAYS are unambiguous and still honoured.
+    const uint8_t f = z.func & 7;
+    glDepthFunc(f == 0 ? GL_NEVER : f == 7 ? GL_ALWAYS : GL_LEQUAL);
   } else {
     glDisable(GL_DEPTH_TEST);
   }
@@ -1317,6 +1344,9 @@ public:
               ::GX_GetClearColor(cc);
               glClearColor(cc[0] / 255.f, cc[1] / 255.f, cc[2] / 255.f,
                            cc[3] / 255.f);
+              // glClear honours glDepthMask: a preceding draw with ZMode
+              // update disabled would make this depth clear a no-op.
+              glDepthMask(GL_TRUE);
               glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
               g_state.pe_clear_pending = false;
             }
