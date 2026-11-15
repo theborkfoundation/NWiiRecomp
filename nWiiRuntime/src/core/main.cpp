@@ -573,12 +573,14 @@ int main(int argc, char **argv) {
     // Always record to a file while the guest has not drawn anything, so a
     // rare black-screen boot leaves evidence. Console output is opt-in.
     static const bool console = std::getenv("NWII_BOOTWATCH") != nullptr;
+    static const bool dump_all = std::getenv("NWII_BOOTDUMP") != nullptr;
     extern uint64_t g_stat_draws;
-    if (g_stat_draws > 0) return;
+    if (!dump_all && g_stat_draws > 0) return;
     static auto t0 = std::chrono::steady_clock::now();
     static auto last = t0;
     const auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() < 1000)
+    const long interval_ms = dump_all ? 100 : 1000;
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() < interval_ms)
       return;
     last = now;
     const double secs =
@@ -586,15 +588,33 @@ int main(int argc, char **argv) {
     char line[512];
     std::snprintf(line, sizeof(line),
                   "[BOOTWATCH] t=%lds pc=0x%08X lr=0x%08X in_cb=%d saved=0x%08X "
-                  "pend_cb=%u intsr=0x%08X intmr=0x%08X cur=0x%08X msr=0x%08X",
+                  "pend_cb=%u intsr=0x%08X intmr=0x%08X cur=0x%08X msr=0x%08X "
+                  "r13=0x%08X runq=0x%08X vi_h=0x%08X lastint=0x%X nint=%llu",
                   (long)secs, ctx->pc, ctx->lr, (int)ctx->in_callback,
                   ctx->dispatch_saved_ctx,
                   (unsigned)ctx->pending_cb_count.load(std::memory_order_relaxed),
                   nwii::runtime::hw::pi_intsr.load(std::memory_order_relaxed),
                   nwii::runtime::hw::pi_intmr.load(std::memory_order_relaxed),
-                  ctx->mmu.read32(0x800000E4), ctx->msr);
-    static FILE *f = std::fopen("/tmp/nwii_bootwatch.log", "w");
+                  ctx->mmu.read32(0x800000E4), ctx->msr, ctx->gpr[13],
+                  ctx->gpr[13] >= 0x80000000u
+                      ? ctx->mmu.read32(ctx->gpr[13] - 24944)
+                      : 0u,
+                  ctx->mmu.read32(0x800030A0),
+                  nwii::runtime::hw::pi_last_mask.load(std::memory_order_relaxed),
+                  (unsigned long long)nwii::runtime::hw::pi_raise_count.load(
+                      std::memory_order_relaxed));
+    if (!dump_all && secs >= 4.0) {
+      static bool dumped = false;
+      if (!dumped) {
+        dumped = true;
+        nwii::runtime::trace_recent_dump("boot stall: no draws for 4s");
+      }
+    }
+    static FILE *f = std::fopen(dump_all ? "/tmp/nwii_bootdump.log"
+                                         : "/tmp/nwii_bootwatch.log",
+                                "w");
     if (f) { std::fprintf(f, "%s\n", line); std::fflush(f); }
+    if (dump_all && secs > 8.0) return;
     if (console) std::cout << line << "\n";
 
     // Dump the guest thread list so a stall shows which queues are waiting.

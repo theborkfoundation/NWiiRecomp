@@ -11,12 +11,16 @@ uint64_t get_os_time();
 namespace nwii::runtime::hw {
 
 extern std::atomic<uint32_t> pi_intsr;
+extern std::atomic<uint32_t> pi_last_mask;
+extern std::atomic<uint64_t> pi_raise_count;
 extern std::atomic<uint32_t> pi_intmr;
 extern std::atomic<uint32_t> g_pe_sr;       
 extern int g_di_interrupt_delay; 
 
 inline void trigger_pi_interrupt(uint32_t mask) {
   pi_intsr.fetch_or(mask, std::memory_order_relaxed);
+  pi_last_mask.store(mask, std::memory_order_relaxed);
+  pi_raise_count.fetch_add(1, std::memory_order_relaxed);
 }
 inline void clear_pi_interrupt(uint32_t mask) {
   pi_intsr.fetch_and(~mask, std::memory_order_relaxed);

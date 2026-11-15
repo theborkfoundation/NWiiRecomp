@@ -1435,8 +1435,16 @@ bool process_pending_callbacks(CPUContext &ctx) {
                           // See the note above: any value of __OSCurrentContext
                           // is legitimate here (stack temp context or
                           // IdleContext). Save into it like the hardware does.
+                          // Enter the guest exception stub and let the guest's
+                          // own __OSDispatchInterrupt / __OSUnlockScheduler /
+                          // __OSReschedule / OSLoadContext run. The host-side
+                          // direct-handler path is racy: it can leave a READY
+                          // thread unqueued and the idle thread spinning
+                          // forever (intermittent boot stall). Opt out with
+                          // NWII_NO_PI_EXC for comparison.
                           static const bool s_via_exc =
-                              (std::getenv("NWII_PI_VIA_EXC") != nullptr);
+                              std::getenv("NWII_NO_PI_EXC") == nullptr ||
+                              std::getenv("NWII_PI_VIA_EXC") != nullptr;
                           if (s_via_exc) {
                               // Faithful path: enter the guest's exception-4
                               // stub (0x8009B3D0) which finishes saving the

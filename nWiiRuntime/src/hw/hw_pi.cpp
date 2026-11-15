@@ -10,6 +10,8 @@
 namespace nwii::runtime::hw {
 
 std::atomic<uint32_t> pi_intsr = 0;
+std::atomic<uint32_t> pi_last_mask = 0;
+std::atomic<uint64_t> pi_raise_count = 0;
 std::atomic<uint32_t> pi_intmr = 0;
 
 
