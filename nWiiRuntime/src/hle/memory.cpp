@@ -38,13 +38,22 @@ void OSInitAlloc(CPUContext& ctx) {
 void OSCreateHeap(CPUContext& ctx) {
     uint32_t start_addr = ctx.gpr[3];
     uint32_t end_addr = ctx.gpr[4];
-    uint32_t size = end_addr - start_addr;
+    uint32_t aligned_start = (start_addr + 31u) & ~31u;
 
-    uint32_t aligned_start = (start_addr + 31) & ~31;
-    
-    ctx.mmu.write32(aligned_start + 0x18, 0x46520000); 
-    ctx.mmu.write32(aligned_start + 0x1C, size - 32);
-    
+    // Usable space must be measured from the aligned start, otherwise an
+    // unaligned start lets the free block run past end_addr. Reject reversed
+    // or too-small ranges before doing any unsigned arithmetic.
+    if (end_addr <= aligned_start || end_addr - aligned_start < 32u) {
+        std::cerr << "[HLE Memory] OSCreateHeap invalid range 0x" << std::hex
+                  << start_addr << "-0x" << end_addr << std::dec << "\n";
+        ctx.gpr[3] = (uint32_t)-1;
+        return;
+    }
+    uint32_t usable = end_addr - aligned_start;
+
+    ctx.mmu.write32(aligned_start + 0x18, 0x46520000);
+    ctx.mmu.write32(aligned_start + 0x1C, usable - 32u);
+
     int handle = -1;
     for (int i = 0; i < MAX_HEAPS; i++) {
         if (!g_heaps[i].active) {
@@ -56,9 +65,11 @@ void OSCreateHeap(CPUContext& ctx) {
         }
     }
 
-    std::cout << "[HLE Memory] OSCreateHeap at 0x" << std::hex << aligned_start << " (Size: " << std::dec << size << ") -> Handle: " << handle << "\n";
-    
-    ctx.gpr[3] = handle; 
+    std::cout << "[HLE Memory] OSCreateHeap at 0x" << std::hex << aligned_start
+              << " (Size: " << std::dec << usable << ") -> Handle: " << handle
+              << "\n";
+
+    ctx.gpr[3] = (uint32_t)handle;
 }
 
 void OSDestroyHeap(CPUContext& ctx) {

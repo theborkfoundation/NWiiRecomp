@@ -74,6 +74,36 @@ static bool is_hle_function(const std::string &name) {
   return hle_handlers().count(bare_symbol(name)) != 0;
 }
 
+static std::string configured_hook(const analyzer::Function &func,
+                                   const RecompilerConfig &config) {
+  auto it = config.hle_hooks.find(func.start_address);
+  if (it != config.hle_hooks.end())
+    return it->second;
+  return {};
+}
+
+// Handler selected by the analyzer (instruction signature) or the automatic
+// name allowlist. These functions are structural HLE: excluded from the guest
+// range table and dispatched through the exact-address switch.
+static std::string auto_hle_handler(const analyzer::Function &func,
+                                    const std::string &base_name) {
+  if (!func.hle_hook_name.empty())
+    return func.hle_hook_name;
+  if (is_hle_function(base_name))
+    return base_name;
+  return {};
+}
+
+// Explicit [hle_hooks] configuration takes precedence over the automatic
+// handler, so an override is never silently shadowed.
+static std::string effective_handler(const analyzer::Function &func,
+                                     const std::string &base_name,
+                                     const RecompilerConfig &config) {
+  if (std::string hook = configured_hook(func, config); !hook.empty())
+    return hook;
+  return auto_hle_handler(func, base_name);
+}
+
 
 std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
   std::vector<std::string> generated_files;
@@ -249,12 +279,18 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
 
       std::string func_name = all_func_names[func_idx];
       const std::string &base_name = all_base_names[func_idx++];
-      if (!func.hle_hook_name.empty() || is_hle_function(base_name)) {
-        std::string target =
-            !func.hle_hook_name.empty() ? func.hle_hook_name : base_name;
-        if (target != func_name) {
+      const bool structural_hle = !auto_hle_handler(func, base_name).empty();
+      if (structural_hle) {
+        const std::string hle_handler =
+            effective_handler(func, base_name, config_);
+        // Wrapper with a distinct name. When the generated name already
+        // equals the handler name no wrapper can be emitted; those functions
+        // are addressed by their runtime symbol directly.
+        if (hle_handler != func_name) {
           out << "void " << func_name << "(nwii::runtime::CPUContext& ctx) {\n";
-          out << "    " << target << "(ctx);\n";
+          out << "    extern void " << hle_handler
+              << "(nwii::runtime::CPUContext&);\n";
+          out << "    " << hle_handler << "(ctx);\n";
           out << "    ctx.pc = ctx.lr;\n";
           out << "}\n\n";
         }
@@ -303,8 +339,8 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       ++func_idx;
-      bool is_hle = !func.hle_hook_name.empty() ||
-                    is_hle_function(all_base_names[func_idx - 1]);
+      bool is_hle =
+          !auto_hle_handler(func, all_base_names[func_idx - 1]).empty();
       if (is_hle)
         continue;
       uint32_t hi = func.end_address;
@@ -334,8 +370,8 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
-      bool is_hle = !func.hle_hook_name.empty() ||
-                    is_hle_function(all_base_names[func_idx]);
+      bool is_hle =
+          !auto_hle_handler(func, all_base_names[func_idx]).empty();
       ++func_idx;
       if (!is_hle) {
         out << "    {0x" << std::hex << std::uppercase << start_addr << ", 0x"
@@ -408,16 +444,23 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
-      bool is_hle = !func.hle_hook_name.empty() ||
-                    is_hle_function(all_base_names[func_idx]);
+      bool is_hle =
+          !auto_hle_handler(func, all_base_names[func_idx]).empty();
       ++func_idx;
       if (!is_hle)
         continue;
-      std::string hle_target =
-          !func.hle_hook_name.empty() ? func.hle_hook_name : func_name;
+      // Match the historic dispatch target: the analyzer-provided handler
+      // when there is one, otherwise the generated wrapper. A configured hook
+      // always goes through the wrapper so the override is honoured.
+      std::string dispatch_target = func_name;
+      if (configured_hook(func, config_).empty() &&
+          !func.hle_hook_name.empty())
+        dispatch_target = func.hle_hook_name;
       out << "            case 0x" << std::hex << std::uppercase << start_addr
-          << std::dec << ": " << hle_target
+          << std::dec << ": {\n";
+      out << "                " << dispatch_target
           << "(ctx); ctx.pc = ctx.lr; break;\n";
+      out << "            }\n";
     }
     out << "            default: {\n";
     out << "                // g_func_bounds is sorted by start (sentinel last).\n";
@@ -604,8 +647,8 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
-      bool is_hle = !func.hle_hook_name.empty() ||
-                    is_hle_function(all_base_names[func_idx]);
+      bool is_hle =
+          !auto_hle_handler(func, all_base_names[func_idx]).empty();
       ++func_idx;
       if (!is_hle) {
         out << "    {0x" << std::hex << std::uppercase << start_addr << ", 0x"
@@ -679,8 +722,8 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
     func_idx = 0;
     for (const auto &[start_addr, func] : analyzer_.get_functions()) {
       std::string func_name = all_func_names[func_idx];
-      bool is_hle = !func.hle_hook_name.empty() ||
-                    is_hle_function(all_base_names[func_idx]);
+      bool is_hle =
+          !auto_hle_handler(func, all_base_names[func_idx]).empty();
       ++func_idx;
 
       if (emitted_cases.insert(start_addr).second) {
@@ -908,18 +951,19 @@ void Recompiler::emit_function(std::ostream &out,
                                const std::string &func_name) {
   out << "void " << func_name << "(CPUContext& ctx) {\n";
 
-  
-  
-  auto hook = config_.hle_hooks.find(func.start_address);
-  if (hook != config_.hle_hooks.end()) {
-    // The handler lives in the runtime and is not part of the fixed HLE
-    // declaration list, so declare it at block scope.
-    out << "    extern void " << hook->second << "(CPUContext&);\n";
-    out << "    " << hook->second << "(ctx);\n";
+  // Explicit [hle_hooks] configuration replaces the guest body. Non-auto-HLE
+  // functions stay in the dispatcher range table (like before), so callers
+  // that jump into the function still land on the hook wrapper.
+  if (std::string hook = configured_hook(func, config_); !hook.empty()) {
+    out << "    extern void " << hook << "(CPUContext&);\n";
+    out << "    " << hook << "(ctx);\n";
     out << "    ctx.pc = ctx.lr; return;\n";
     out << "}\n\n";
     return;
   }
+
+  
+  
 
   
 
@@ -1391,11 +1435,15 @@ void Recompiler::emit_instruction(std::ostream &out,
           }
         }
         if (is_mapped) {
-          bool target_is_hle = (symbols_ && symbols_->has_symbol(target) &&
-                                is_hle_function(symbols_->get_symbol(target)));
           out << "    ctx.pc = 0x" << std::hex << std::uppercase << target
               << std::dec << "; ";
           out << target_name << "(ctx);\n";
+          // Some HLE handlers (e.g. OSReport) are addressed by their handler
+          // name directly and do not set ctx.pc. Treat an unchanged pc as a
+          // normal return so the dispatcher does not invoke the handler again.
+          out << "    if (ctx.pc == 0x" << std::hex << std::uppercase << target
+              << std::dec << ") ctx.pc = 0x" << std::hex << std::uppercase
+              << (inst.address + 4) << std::dec << ";\n";
           out << "    if (ctx.pc != 0x" << std::hex << std::uppercase
               << (inst.address + 4) << std::dec << ") return;\n";
         } else {

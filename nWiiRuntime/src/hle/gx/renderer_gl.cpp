@@ -86,6 +86,7 @@ static GLuint CompileShader(const char *vs, const char *fs) {
   // The generated shaders are #version 330; a 3.2-core context only accepts
   // GLSL 1.50. Surface that loudly instead of drawing with a dead program.
   static int s_shader_errors = 0;
+  bool compile_ok = true;
   for (int i = 0; i < 2; ++i) {
     GLuint s = i ? f : v;
     GLint ok = 0;
@@ -98,6 +99,7 @@ static GLuint CompileShader(const char *vs, const char *fs) {
                 << " shader compile FAILED: " << log << std::endl;
     }
     if (!ok) {
+      compile_ok = false;
       static const int kSlot =
           NWII_DIAG_SLOT("shader.compile_failed", diag::Kind::Error);
       diag::bump(kSlot);
@@ -112,6 +114,8 @@ static GLuint CompileShader(const char *vs, const char *fs) {
   {
     GLint linked = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &linked);
+    if (!linked)
+      compile_ok = false;
     if (!linked) {
       static const int kSlot =
           NWII_DIAG_SLOT("shader.link_failed", diag::Kind::Error);
@@ -127,6 +131,10 @@ static GLuint CompileShader(const char *vs, const char *fs) {
 
   glDeleteShader(v);
   glDeleteShader(f);
+  if (!compile_ok) {
+    glDeleteProgram(p);
+    return 0;
+  }
   return p;
 }
 
@@ -728,6 +736,12 @@ static void SetupDrawState(const GXCommand &cmd) {
     sh.uLightDistAtt = glGetUniformLocation(sh.id, "uLightDistAtt[0]");
 
     s_shader_cache[hash] = sh;
+    if (sh.id == 0) {
+      // Compilation/link failed: cache the failure so the draw is skipped
+      // instead of binding a dead program (or retrying every frame).
+      s_skip_draw = true;
+      return;
+    }
     s_active_shader = sh;
     if (gx_trace())
       printf("[GXTRACE] Compiled new shader! Hash: %llx\n",

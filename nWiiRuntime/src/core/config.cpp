@@ -35,8 +35,12 @@ void Config::load(const std::string& filepath) {
         auto back = tbl["graphics"]["backend"].value<std::string>();
         if (back) {
             if (*back == "Metal" || *back == "metal") {
-                backend = Backend::Metal;
-                std::cout << "[Config] Backend set to Metal." << std::endl;
+                // The Metal renderer is not implemented (empty Render/Present)
+                // and initialization would call GL without a context. Fall
+                // back until the backend exists end to end.
+                backend = Backend::OpenGL;
+                std::cout << "[Config] Metal backend is not implemented yet; "
+                             "using OpenGL." << std::endl;
             } else {
                 backend = Backend::OpenGL;
                 std::cout << "[Config] Backend set to OpenGL." << std::endl;
