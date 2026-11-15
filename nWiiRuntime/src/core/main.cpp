@@ -603,17 +603,38 @@ int main(int argc, char **argv) {
                   nwii::runtime::hw::pi_last_mask.load(std::memory_order_relaxed),
                   (unsigned long long)nwii::runtime::hw::pi_raise_count.load(
                       std::memory_order_relaxed));
+    static FILE *f = std::fopen(dump_all ? "/tmp/nwii_bootdump.log"
+                                         : "/tmp/nwii_bootwatch.log",
+                                "w");
+    if (f) { std::fprintf(f, "%s\n", line); std::fflush(f); }
     if (!dump_all && secs >= 4.0) {
       static bool dumped = false;
       if (!dumped) {
         dumped = true;
         nwii::runtime::trace_recent_dump("boot stall: no draws for 4s");
+        char rl[512];
+        int off = 0;
+        off += std::snprintf(rl + off, sizeof(rl) - off,
+                             "[REGS] r0=%08X r3=%08X r4=%08X r5=%08X r6=%08X "
+                             "r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X "
+                             "lr=%08X ctr=%08X\n",
+                             ctx->gpr[0], ctx->gpr[3], ctx->gpr[4], ctx->gpr[5],
+                             ctx->gpr[6], ctx->gpr[7], ctx->gpr[8], ctx->gpr[9],
+                             ctx->gpr[10], ctx->gpr[11], ctx->lr, ctx->ctr);
+        for (uint32_t reg : {3u, 5u, 7u}) {
+          const uint32_t a = ctx->gpr[reg];
+          if (a < 0x80000000u || a >= 0x94000000u) continue;
+          off += std::snprintf(rl + off, sizeof(rl) - off, "[MEM r%u=%08X]", reg, a);
+          for (int i = 0; i < 8; ++i)
+            off += std::snprintf(rl + off, sizeof(rl) - off, " %02X",
+                                 ctx->mmu.read8(a + i));
+          off += std::snprintf(rl + off, sizeof(rl) - off, "\n");
+        }
+        if (f) { std::fprintf(f, "%s", rl); std::fflush(f); }
+        std::cout << rl << std::flush;
       }
     }
-    static FILE *f = std::fopen(dump_all ? "/tmp/nwii_bootdump.log"
-                                         : "/tmp/nwii_bootwatch.log",
-                                "w");
-    if (f) { std::fprintf(f, "%s\n", line); std::fflush(f); }
+
     if (dump_all && secs > 8.0) return;
     if (console) std::cout << line << "\n";
 
