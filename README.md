@@ -184,6 +184,29 @@ Generated code is not usable without optimization, so use a Release build (or
 `--config Release` with a multi-config generator) for any performance
 measurement.
 
+### Linux ARM64 cross-build sysroot
+
+The Linux ARM64 target uses Debian `arm64` (a 64-bit aarch64 userland) and needs
+the target's headers and libraries before cross-compiling. `tools/debian-sysroot.py`
+resolves the SDL2/X11/Wayland dependency closure from the Debian trixie archive,
+downloads the `.deb`s into `build/debs-arm64`, and unpacks them into
+`build/sysroot-arm64`:
+
+```bash
+./tools/debian-sysroot.py                            # populate from the lock
+./tools/debian-sysroot.py --verify                   # check the tree against the lock
+./tools/debian-sysroot.py --update-lock --dry-run    # refresh the lock, no downloads
+./tools/debian-sysroot.py --print-pkgconfig          # pkg-config environment for the tree
+```
+
+`tools/sysroots/arm64.lock` pins the exact package versions; regular runs resolve
+against it, and `--update-lock` is the deliberate way to move. Only the lock is
+tracked; the sysroot and `.deb` cache are derived artifacts under the ignored
+`build/` directory. Unpacking zstd-compressed `.deb` payloads needs `bsdtar`
+(`libarchive-tools` on Linux; macOS ships it). This is the sysroot foundation
+for the next step: wiring a Linux ARM64 cross toolchain/preset against
+`build/sysroot-arm64`.
+
 ---
 
 ## Usage
