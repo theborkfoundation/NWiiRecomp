@@ -634,31 +634,12 @@ bool Recompiler::generate_cmake_project(uint32_t entry_point) {
   out << "    GIT_TAG        v3.4.0\n";
   out << ")\n";
   out << "FetchContent_MakeAvailable(tomlplusplus)\n\n";
-  out << "FetchContent_Declare(\n";
-  out << "    SDL2\n";
-  out << "    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git\n";
-  out << "    GIT_TAG        release-2.28.5\n";
-  out << ")\n";
-  out << "set(SDL2_DISABLE_INSTALL ON CACHE BOOL \"\" FORCE)\n";
-  out << "FetchContent_MakeAvailable(SDL2)\n\n";
 
-  
-
-  out << "if(APPLE)\n";
-  out << "    set(_sdl_gl_src "
-         "\"${sdl2_SOURCE_DIR}/src/video/cocoa/SDL_cocoaopengl.m\")\n";
-  out << "    if(EXISTS \"${_sdl_gl_src}\")\n";
-  out << "        file(READ \"${_sdl_gl_src}\" _sdl_gl_txt)\n";
-  out << "        string(REPLACE \"attr[i++] = "
-         "NSOpenGLPFAAllowOfflineRenderers;\"\n";
-  out << "                       \"/* NWii: breaks pixel format on dual-GPU "
-         "Macs */\"\n";
-  out << "                       _sdl_gl_patched \"${_sdl_gl_txt}\")\n";
-  out << "        if(NOT _sdl_gl_txt STREQUAL _sdl_gl_patched)\n";
-  out << "            file(WRITE \"${_sdl_gl_src}\" \"${_sdl_gl_patched}\")\n";
-  out << "        endif()\n";
-  out << "    endif()\n";
-  out << "endif()\n\n";
+  // Fetch SDL2 2.28.5 by default, or use the target's SDL2 through pkg-config
+  // with -DNWII_SYSTEM_SDL2=ON (the Linux ARM64 cross-build path).
+  out << "# SDL2: fetched by default, or the target's system SDL2 with\n";
+  out << "# -DNWII_SYSTEM_SDL2=ON.\n";
+  out << "include(\"${CMAKE_CURRENT_SOURCE_DIR}/nWiiRuntime/cmake/sdl.cmake\")\n\n";
 
   out << "add_subdirectory(nWiiRuntime)\n\n";
 

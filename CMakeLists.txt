@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(nWiiRecomp LANGUAGES C CXX OBJC OBJCXX)
+project(nWiiRecomp LANGUAGES C CXX)
+
+# Only the macOS Metal renderer needs Objective-C. Keeping these languages off
+# other platforms lets a Linux ARM64 cross toolchain configure this project
+# without an Objective-C compiler for the target.
+if(APPLE)
+    enable_language(OBJC)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,33 +45,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tomlplusplus)
 
-FetchContent_Declare(
-    SDL2
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG        release-2.28.5
-)
-set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(SDL2)
-
-# SDL's Cocoa GL backend unconditionally asks for NSOpenGLPFAAllowOfflineRenderers
-# *and* pins NSOpenGLPFAScreenMask to one display. On dual-GPU Macs (e.g. Intel +
-# Radeon Pro) no pixel format satisfies both, so every SDL_GL_CreateContext fails
-# with "Failed creating OpenGL pixel format" — verified with a standalone probe:
-# the same attributes minus this one succeed. Drop it; offline renderers are of
-# no use to us anyway. Idempotent, runs at configure time before SDL compiles.
-if(APPLE)
-    set(_sdl_gl_src "${sdl2_SOURCE_DIR}/src/video/cocoa/SDL_cocoaopengl.m")
-    if(EXISTS "${_sdl_gl_src}")
-        file(READ "${_sdl_gl_src}" _sdl_gl_txt)
-        string(REPLACE "attr[i++] = NSOpenGLPFAAllowOfflineRenderers;"
-                       "/* NWii: breaks pixel format on dual-GPU Macs */"
-                       _sdl_gl_patched "${_sdl_gl_txt}")
-        if(NOT _sdl_gl_txt STREQUAL _sdl_gl_patched)
-            file(WRITE "${_sdl_gl_src}" "${_sdl_gl_patched}")
-            message(STATUS "Patched SDL Cocoa GL: removed AllowOfflineRenderers")
-        endif()
-    endif()
-endif()
+# SDL2: fetched 2.28.5 by default, or the target's system SDL2 with
+# -DNWII_SYSTEM_SDL2=ON (the Linux ARM64 cross-build path).
+include("${CMAKE_SOURCE_DIR}/nWiiRuntime/cmake/sdl.cmake")
 
 add_subdirectory(nWiiAnalyzer)
 add_subdirectory(nWiiRecomp)

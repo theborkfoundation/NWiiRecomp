@@ -58,6 +58,9 @@ int main() {
           "Release default");
   require(text.find("set(CMAKE_CXX_EXTENSIONS ON)") != std::string::npos,
           "GNU extensions for the resume dispatch");
+  require(text.find("include(\"${CMAKE_CURRENT_SOURCE_DIR}/nWiiRuntime/cmake/"
+                    "sdl.cmake\")") != std::string::npos,
+          "SDL2 selection module");
   require(fs::exists(output / "main_output.cpp"), "main_output.cpp");
 
   fs::remove_all(root);

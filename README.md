@@ -184,13 +184,19 @@ Generated code is not usable without optimization, so use a Release build (or
 `--config Release` with a multi-config generator) for any performance
 measurement.
 
-### Linux ARM64 cross-build sysroot
+### Linux ARM64 cross builds
 
-The Linux ARM64 target uses Debian `arm64` (a 64-bit aarch64 userland) and needs
-the target's headers and libraries before cross-compiling. `tools/debian-sysroot.py`
-resolves the SDL2/X11/Wayland dependency closure from the Debian trixie archive,
-downloads the `.deb`s into `build/debs-arm64`, and unpacks them into
-`build/sysroot-arm64`:
+The Linux ARM64 target uses Debian `arm64` (a 64-bit aarch64 userland). Prepare
+the target libraries and zig compiler wrappers once:
+
+```bash
+./tools/debian-sysroot.py            # build/sysroot-arm64 from the lock
+./tools/zig-toolchain.sh arm64       # build/zig-aarch64-{cc,cxx,ar,ranlib}
+```
+
+The sysroot tool resolves the SDL2/X11/Wayland dependency closure from the
+Debian trixie archive, downloads the `.deb`s into `build/debs-arm64`, and
+unpacks them into `build/sysroot-arm64`:
 
 ```bash
 ./tools/debian-sysroot.py                            # populate from the lock
@@ -203,9 +209,44 @@ downloads the `.deb`s into `build/debs-arm64`, and unpacks them into
 against it, and `--update-lock` is the deliberate way to move. Only the lock is
 tracked; the sysroot and `.deb` cache are derived artifacts under the ignored
 `build/` directory. Unpacking zstd-compressed `.deb` payloads needs `bsdtar`
-(`libarchive-tools` on Linux; macOS ships it). This is the sysroot foundation
-for the next step: wiring a Linux ARM64 cross toolchain/preset against
-`build/sysroot-arm64`.
+(`libarchive-tools` on Linux; macOS ships it).
+
+Configure a generated export (or this project) for Linux ARM64:
+
+```bash
+cmake -B build-arm64 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/NWiiRecomp/cmake/toolchains/linux-arm64-zig.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNWII_SYSTEM_SDL2=ON \
+  -DNWII_ENABLE_GLES=ON
+cmake --build build-arm64 -j$(nproc)
+```
+
+`NWII_SYSTEM_SDL2=ON` links the sysroot's SDL2 through pkg-config instead of
+cross-building SDL2, so no host `wayland-scanner` is needed. pkg-config's
+library paths stay relative to the sysroot and zig's `--sysroot` resolves them
+once; `PKG_CONFIG_SYSROOT_DIR` must stay unset. Without the option the project
+still fetches SDL2 2.28.5, preserving the macOS/desktop path.
+
+Run on the target:
+
+- X11/Wayland desktop: SDL selects the driver. `[graphics] backend =
+  "OpenGLES"` uses EGL, or keep the default `OpenGL` on Mesa/GLX.
+- KMSDRM console/handheld: `SDL_VIDEODRIVER=kmsdrm`, `[graphics] backend =
+  "OpenGLES"`, and access to the DRM device (`video`/`render` group, console
+  VT).
+- Shared SDL2 requires `libsdl2-2.0-0` plus Mesa/EGL/GLES and the selected
+  window/audio backend libraries on the target.
+- The sysroot lock is Debian trixie (glibc 2.41). Match the target's release
+  with `--suite` + `--update-lock`, or build natively, rather than running a
+  newer-glibc binary on an older userland.
+- Cross builds default to `-g0`: zig emits DWARF even at `-O3`, which turns the
+  ~160 MB release executable into an ~800 MB one. Pass
+  `-DNWII_ARM64_DEBUG_INFO=ON` when you need target symbols.
+
+On a native Debian/Ubuntu arm64 host, install `build-essential cmake
+ninja-build pkg-config libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev` and use
+`-DNWII_SYSTEM_SDL2=ON` without a toolchain file.
 
 ---
 

@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.20)
 
 include(FetchContent)
 
+# The top-level project (and the generated export) includes this module before
+# add_subdirectory. Keep a fallback so nWiiRuntime can also be added directly.
+if(NOT NWII_SDL_LIBRARIES)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sdl.cmake")
+endif()
+
 # GLAD GL loader: use the vendored copy when present, otherwise fetch the
 # generator and produce the same GL 3.3 core loader (glad1 keeps the
 # glad/glad.h + gladLoadGLLoader API this code uses). Either way the result is
@@ -81,7 +87,21 @@ add_library(nwiiruntime STATIC
     src/hle/interpreter.cpp
 )
 
-target_link_libraries(nwiiruntime PUBLIC SDL2-static tomlplusplus::tomlplusplus glad)
+if(NWII_SDL_INCLUDE_DIRS)
+    target_include_directories(nwiiruntime PUBLIC ${NWII_SDL_INCLUDE_DIRS})
+endif()
+if(NWII_SDL_LIBRARY_DIRS)
+    target_link_directories(nwiiruntime PUBLIC ${NWII_SDL_LIBRARY_DIRS})
+endif()
+target_link_libraries(nwiiruntime PUBLIC
+    ${NWII_SDL_LIBRARIES}
+    tomlplusplus::tomlplusplus
+    glad)
+
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(nwiiruntime PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
 
 # OpenGL ES 3.0 shares the GL renderer and loader. Keep an explicit switch so a
 # build can refuse the profile instead of silently producing a GL-only binary;
