@@ -104,6 +104,55 @@ NWiiRecomp/
 - **Headless mode**: `NWII_HEADLESS=1` runs without a window for automated
   boot testing and log capture.
 
+### Rendering backends
+
+Desktop OpenGL 3.3 core is the default. Both profiles share the GL renderer, GX
+command processing, texture decoding and SDL presentation path. Select ES in the
+runtime config:
+
+```toml
+[graphics]
+backend = "OpenGLES"   # case-insensitive; OpenGL remains the default
+```
+
+- The runtime requests an ES 3.0 context through SDL (`PROFILE_ES`, EGL) and
+  verifies the returned context, the required entry points and the
+  shader-relevant limits. Selecting ES on a platform without a usable driver is
+  a hard error carrying the SDL details; there is no silent fallback to desktop
+  OpenGL.
+- TEV and XFB shaders are dialect-aware: GLSL 3.30 for desktop, `#version 300
+  es` with explicit precision qualifiers for ES. GL textures use sized `RGBA8`
+  formats, and the optional EFB texture dump reads through a framebuffer rather
+  than `glGetTexImage`, which ES does not provide.
+- Build with `-DNWII_ENABLE_GLES=OFF` to omit the profile; selecting it then
+  fails with an explicit build-time refusal.
+- **macOS/ANGLE**: macOS has no native ES driver. Point the build at an ANGLE
+  distribution containing `libEGL.dylib` and `libGLESv2.dylib`:
+
+  ```bash
+  cmake -B build -DNWII_ANGLE_DIR=$HOME/Projects/ANGLE-dist
+  ```
+
+  The runtime sets SDL's `SDL_VIDEO_GL_DRIVER`/`SDL_VIDEO_EGL_DRIVER` to the
+  absolute dylib paths unless those variables are already set; ANGLE is loaded
+  dynamically by SDL, not statically linked. Run-time overrides still work.
+  ANGLE redistribution is subject to ANGLE's BSD-3-Clause license.
+- **Tested matrix**:
+  - macOS arm64 (Apple M4), desktop OpenGL 3.3 core context (driver reported
+    OpenGL 4.1 / GLSL 4.10).
+  - macOS arm64 (Apple M4) + ANGLE 2.1 over Metal (local `ANGLE-dist` with
+    `libEGL.dylib`/`libGLESv2.dylib`, arm64, ad-hoc signed; ANGLE reports
+    "git hash: unknown hash") — context `OpenGL ES 3.0.0`, GLSL ES 3.00,
+    16 texture units, 16384 max texture size, 31 varying vectors.
+  - On that ANGLE ES context the TEV and XFB shaders compile and link, EFB
+    rendering and the EFB texture-dump readback work, XFB presentation matches
+    desktop pixel-for-pixel, and captured early boot frames are pixel-identical
+    to desktop GL. Late, time-varying frames differ only by small amounts
+    consistent with a few frames of timing offset.
+  - Linux/EGL (Mesa) and other ES implementations are unverified. Use
+    `SDL_VIDEO_GL_DRIVER`/`SDL_VIDEO_EGL_DRIVER` there; `NWII_ANGLE_DIR` is
+    currently macOS-only.
+
 ### Studio (`nWiiStudio`)
 
 - Raylib + ImGui-based GUI (legacy; main runtime now uses SDL2 + OpenGL)

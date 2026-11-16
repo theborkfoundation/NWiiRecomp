@@ -87,6 +87,36 @@ bool texdump_enabled() {
     return p && p[0];
 }
 
+// GLES 3.0 has no glGetTexImage. Read a texture through a temporary read
+// framebuffer and restore the previous read binding and buffer. The result has
+// the same bottom-up row order glGetTexImage returned.
+bool read_texture_rgba(GLuint tex, int width, int height, void *out) {
+    if (!glad_glGenFramebuffers || !glad_glReadPixels)
+        return false;
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_fbo);
+    GLint prev_buffer = GL_BACK;
+    if (glad_glReadBuffer)
+        glGetIntegerv(GL_READ_BUFFER, &prev_buffer);
+
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, tex, 0);
+    if (glad_glReadBuffer)
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+    const bool ok =
+        glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (ok)
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_fbo);
+    if (glad_glReadBuffer)
+        glReadBuffer((GLenum)(prev_buffer ? prev_buffer : GL_BACK));
+    glDeleteFramebuffers(1, &fbo);
+    return ok;
+}
+
 // Returns a monotonically increasing call index. Files are written to a fixed
 // ring of slots so a long run keeps the most recent textures, not the boot ones.
 int next_dump_index() {
@@ -139,16 +169,26 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     if (GLuint efb = find_efb_texture(stage.base_addr)) {
         if (texdump_enabled()) {
             std::vector<Color> px((size_t)stage.width * stage.height);
-            glBindTexture(GL_TEXTURE_2D, efb);
-            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-            summarize("efb", stage, efb, px.data(), stage.width, stage.height);
-            int idx = next_dump_index();
-            if (idx >= 0) {
-                char path[512];
-                std::snprintf(path, sizeof(path), "%s_%02d_efb_%08X_%ux%u.bmp",
-                              std::getenv("NWII_TEXDUMP"), idx % 40, stage.base_addr,
-                              stage.width, stage.height);
-                dump_bmp32(path, (int)stage.width, (int)stage.height, px.data());
+            if (read_texture_rgba(efb, (int)stage.width, (int)stage.height,
+                                  px.data())) {
+                summarize("efb", stage, efb, px.data(), stage.width,
+                          stage.height);
+                int idx = next_dump_index();
+                if (idx >= 0) {
+                    char path[512];
+                    std::snprintf(path, sizeof(path),
+                                  "%s_%02d_efb_%08X_%ux%u.bmp",
+                                  std::getenv("NWII_TEXDUMP"), idx % 40,
+                                  stage.base_addr, stage.width, stage.height);
+                    dump_bmp32(path, (int)stage.width, (int)stage.height,
+                               px.data());
+                }
+            } else {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    std::cerr << "[TEXDUMP] EFB texture readback unsupported\n";
+                }
             }
         }
         return efb;
@@ -271,7 +311,7 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, stage.width, stage.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.data);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, stage.width, stage.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     UnloadImage(img);

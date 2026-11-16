@@ -1,3 +1,4 @@
+#include "runtime/config.h"
 #include "runtime/cpu_context.h"
 #include "runtime/gx_debug.h"
 #include "runtime/diagnostics.h"
@@ -74,7 +75,8 @@ static float s_proj[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 static GLuint s_vao = 0, s_vbo = 0;
 static GLShader s_active_shader = {0};
 
-static GLuint CompileShader(const char *vs, const char *fs) {
+static GLuint CompileShader(const char *vs, const char *fs,
+                            const char *profile, uint64_t hash) {
   GLuint v = glCreateShader(GL_VERTEX_SHADER);
   glShaderSource(v, 1, &vs, nullptr);
   glCompileShader(v);
@@ -95,8 +97,10 @@ static GLuint CompileShader(const char *vs, const char *fs) {
       ++s_shader_errors;
       char log[2048] = {0};
       glGetShaderInfoLog(s, sizeof(log) - 1, nullptr, log);
-      std::cerr << "[GX] " << (i ? "fragment" : "vertex")
-                << " shader compile FAILED: " << log << std::endl;
+      std::cerr << "[GX] " << profile << " "
+                << (i ? "fragment" : "vertex")
+                << " shader compile FAILED (hash=0x" << std::hex << hash
+                << std::dec << "): " << log << std::endl;
     }
     if (!ok) {
       compile_ok = false;
@@ -125,7 +129,8 @@ static GLuint CompileShader(const char *vs, const char *fs) {
       ++s_shader_errors;
       char log[2048] = {0};
       glGetProgramInfoLog(p, sizeof(log) - 1, nullptr, log);
-      std::cerr << "[GX] shader link FAILED: " << log << std::endl;
+      std::cerr << "[GX] " << profile << " shader link FAILED (hash=0x"
+                << std::hex << hash << std::dec << "): " << log << std::endl;
     }
   }
 
@@ -629,12 +634,24 @@ static void DrawPrimitive(const GXCommand &cmd) {
   EmitPrimitive(cmd);
 }
 
+static ShaderDialect ShaderDialectForBackend() {
+  return Config::get().backend == Backend::OpenGLES
+             ? ShaderDialect::OpenGLES
+             : ShaderDialect::DesktopGL;
+}
+
 static void SetupDrawState(const GXCommand &cmd) {
   static const bool use_shader = (std::getenv("NWII_NOSHADER") == nullptr);
   if (!use_shader)
     return;
 
+  const ShaderDialect dialect = ShaderDialectForBackend();
   uint64_t hash = g_state.GetShaderHash(cmd.prim_type);
+  // The profile is part of the program's identity: the same GX state produces
+  // GLSL 3.30 or GLSL ES 3.00 source. If context recreation is ever added,
+  // clear s_shader_cache as well — program names are context-local.
+  if (dialect == ShaderDialect::OpenGLES)
+    hash ^= 0x4F50454E474C4553ull;
 
   if (!g_stat_hash0)
     g_stat_hash0 = hash;
@@ -652,7 +669,7 @@ static void SetupDrawState(const GXCommand &cmd) {
     return;
   } else {
     ++s_compiles_this_frame;
-    auto src = GenerateTEVShader(g_state, cmd.prim_type);
+    auto src = GenerateTEVShader(g_state, cmd.prim_type, dialect);
     static const bool s_shdump1 = std::getenv("NWII_SHADERDUMP") != nullptr;
     if (s_shdump1) {
       static int sn = 0;
@@ -672,8 +689,10 @@ static void SetupDrawState(const GXCommand &cmd) {
     sh.uDbgNoAT = -1;
     sh.uDbgAlphaView = -1;
     sh.uDbgNoTex = -1;
-    sh.id =
-        CompileShader(src.vertex_source.c_str(), src.fragment_source.c_str());
+    const char *profile_label =
+        dialect == ShaderDialect::OpenGLES ? "OpenGL ES" : "OpenGL";
+    sh.id = CompileShader(src.vertex_source.c_str(), src.fragment_source.c_str(),
+                          profile_label, hash);
     static const bool s_shdump2 = std::getenv("NWII_SHADERDUMP") != nullptr;
     if (s_shdump2) {
       static int vn2 = 0;
@@ -937,7 +956,7 @@ static void SetupDrawState(const GXCommand &cmd) {
                        (int)cmd.vertices[0].has_tex[t],
                        cmd.vertices[0].tex[t][0], cmd.vertices[0].tex[t][1],
                        cmd.vertices[3].tex[t][0], cmd.vertices[3].tex[t][1]);
-        auto dbg = GenerateTEVShader(g_state, cmd.prim_type);
+        auto dbg = GenerateTEVShader(g_state, cmd.prim_type, dialect);
         std::fprintf(f, "==== FS ====\n%s\n", dbg.fragment_source.c_str());
         std::fclose(f);
         std::fprintf(stderr, "[FRAMEDUMP] wrote frame_dump.txt\n");
@@ -1347,7 +1366,7 @@ public:
             if (!tex)
               glGenTextures(1, &tex);
             glBindTexture(GL_TEXTURE_2D, tex);
-            glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_state.efbSrcX,
+            glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_state.efbSrcX,
                              g_state.efbSrcY, w, h, 0);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);

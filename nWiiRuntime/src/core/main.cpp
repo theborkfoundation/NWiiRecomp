@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -72,7 +73,7 @@ struct XfbBlit {
   GLint sampler = -1;
 };
 
-GLuint xfb_compile(GLenum type, const char *src) {
+GLuint xfb_compile(GLenum type, const char *src, const char *profile) {
   GLuint s = glCreateShader(type);
   glShaderSource(s, 1, &src, nullptr);
   glCompileShader(s);
@@ -81,15 +82,16 @@ GLuint xfb_compile(GLenum type, const char *src) {
   if (!ok) {
     char log[1024] = {0};
     glGetShaderInfoLog(s, sizeof(log) - 1, nullptr, log);
-    std::cerr << "[XFB] shader compile failed: " << log << std::endl;
+    std::cerr << "[XFB] shader compile failed (" << profile << "): " << log
+              << std::endl;
     glDeleteShader(s);
     return 0;
   }
   return s;
 }
 
-bool xfb_blit_init(XfbBlit &b) {
-  static const char *vs = R"(#version 150 core
+bool xfb_blit_init(XfbBlit &b, bool es) {
+  static const char *vs_gl = R"(#version 150 core
 out vec2 uv;
 void main() {
   vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
@@ -97,14 +99,34 @@ void main() {
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }
 )";
-  static const char *fs = R"(#version 150 core
+  static const char *fs_gl = R"(#version 150 core
 in vec2 uv;
 uniform sampler2D uTex;
 out vec4 oCol;
 void main() { oCol = texture(uTex, uv); }
 )";
-  GLuint v = xfb_compile(GL_VERTEX_SHADER, vs);
-  GLuint f = xfb_compile(GL_FRAGMENT_SHADER, fs);
+  static const char *vs_es = R"(#version 300 es
+precision highp float;
+out vec2 uv;
+void main() {
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+  static const char *fs_es = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 uv;
+uniform sampler2D uTex;
+out vec4 oCol;
+void main() { oCol = texture(uTex, uv); }
+)";
+  const char *profile = es ? "OpenGL ES" : "OpenGL";
+  const char *vs = es ? vs_es : vs_gl;
+  const char *fs = es ? fs_es : fs_gl;
+  GLuint v = xfb_compile(GL_VERTEX_SHADER, vs, profile);
+  GLuint f = xfb_compile(GL_FRAGMENT_SHADER, fs, profile);
   if (!v || !f) return false;
   b.prog = glCreateProgram();
   glAttachShader(b.prog, v);
@@ -118,7 +140,8 @@ void main() { oCol = texture(uTex, uv); }
   if (!ok) {
     char log[1024] = {0};
     glGetProgramInfoLog(b.prog, sizeof(log) - 1, nullptr, log);
-    std::cerr << "[XFB] program link failed: " << log << std::endl;
+    std::cerr << "[XFB] program link failed (" << profile << "): " << log
+              << std::endl;
     return false;
   }
   b.sampler = glGetUniformLocation(b.prog, "uTex");
@@ -186,6 +209,9 @@ int main(int argc, char **argv) {
   // NWII_HIDDEN_WINDOW: keep the GL path (and therefore screenshots) alive but
   // create the window hidden, so it never takes focus or the cursor.
   const bool hidden_window = std::getenv("NWII_HIDDEN_WINDOW") != nullptr;
+  const bool gles_requested =
+      nwii::runtime::Config::get().backend ==
+      nwii::runtime::Backend::OpenGLES;
 
   SDL_Window* window = nullptr;
   SDL_GLContext gl_ctx = nullptr;
@@ -195,22 +221,72 @@ int main(int argc, char **argv) {
   XfbBlit xfb_blit;
 
   if (!headless) {
+#if !defined(NWII_ENABLE_GLES) || (NWII_ENABLE_GLES == 0)
+    if (gles_requested) {
+      std::cerr << "[GL] OpenGL ES 3.0 support was disabled at build time "
+                   "(NWII_ENABLE_GLES=OFF). Rebuild with "
+                   "-DNWII_ENABLE_GLES=ON or select backend = \"OpenGL\"."
+                << std::endl;
+      return 1;
+    }
+#endif
+#if defined(NWII_ANGLE_DIR)
+    if (gles_requested) {
+      // SDL's EGL backend loads the driver libraries by name. Point it at the
+      // ANGLE distribution selected at configure time unless the caller has
+      // provided explicit paths.
+      if (!std::getenv("SDL_VIDEO_GL_DRIVER")) {
+        SDL_setenv("SDL_VIDEO_GL_DRIVER",
+                   NWII_ANGLE_DIR "/libGLESv2.dylib", 0);
+      }
+      if (!std::getenv("SDL_VIDEO_EGL_DRIVER")) {
+        SDL_setenv("SDL_VIDEO_EGL_DRIVER", NWII_ANGLE_DIR "/libEGL.dylib", 0);
+      }
+      std::cout << "[GL] ANGLE drivers: " << NWII_ANGLE_DIR << std::endl;
+    }
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
       std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
       return 1;
     }
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    if (gles_requested) {
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                          SDL_GL_CONTEXT_PROFILE_ES);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+      // EGL is the portable route to ES 3.0 on desktop Linux; ANGLE also
+      // provides it on platforms without native ES drivers.
+      if (SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1) != 0) {
+        std::cout << "[GL] SDL_GL_CONTEXT_EGL unavailable: " << SDL_GetError()
+                  << " (continuing; the platform may still provide ES through "
+                     "another driver)"
+                  << std::endl;
+      }
+    } else {
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                          SDL_GL_CONTEXT_PROFILE_CORE);
+#ifdef __APPLE__
+      // macOS only exposes 3.3+ core contexts and needs the forward-compatible
+      // flag. ES contexts must not request it.
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS,
+                          SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
+    }
 
     
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    // All rendering targets the EFB framebuffer, which owns its own depth
+    // attachment. Asking the window config for depth/stencil only restricts
+    // the EGL configs an ES context can use.
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, gles_requested ? 0 : 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, gles_requested ? 0 : 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     {
       SDL_DisplayMode dm;
@@ -221,13 +297,9 @@ int main(int argc, char **argv) {
         std::cerr << "[GL] no display mode: " << SDL_GetError()
                   << " (screen locked or no display attached?)" << std::endl;
     }
-#ifdef __APPLE__
-
-    
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS,
-                        SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-#endif
-    bool use_gl = (nwii::runtime::Config::get().backend == nwii::runtime::Backend::OpenGL);
+    const bool use_gl =
+        nwii::runtime::Config::get().backend == nwii::runtime::Backend::OpenGL ||
+        gles_requested;
     uint32_t window_flags = (hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) |
                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (use_gl) {
@@ -243,6 +315,13 @@ int main(int argc, char **argv) {
                               window_flags);
     if (!window) {
       std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << "\n";
+      if (gles_requested) {
+        std::cerr
+            << "[GL] OpenGL ES 3.0 window/context setup failed. Provide a GLES "
+               "3.0 driver (Mesa/EGL on Linux, or an SDL build with ANGLE and "
+               "SDL_OPENGL_ES_DRIVER on platforms without native ES) or select "
+               "backend = \"OpenGL\". No fallback is attempted.\n";
+      }
       return 1;
     }
 
@@ -252,18 +331,82 @@ int main(int argc, char **argv) {
     if (use_gl) {
       gl_ctx = SDL_GL_CreateContext(window);
       if (!gl_ctx) {
-        std::cerr << "SDL_GL_CreateContext failed: " << SDL_GetError() << "\n";
+        std::cerr << "SDL_GL_CreateContext failed for "
+                  << (gles_requested ? "OpenGL ES 3.0" : "OpenGL 3.3") << ": "
+                  << SDL_GetError() << "\n";
+        if (gles_requested) {
+          std::cerr
+              << "[GL] No fallback to desktop OpenGL: the selected GLES profile "
+                 "must be available. Provide a GLES 3.0 driver (for example "
+                 "Mesa/EGL on Linux) or an SDL build with ANGLE and set "
+                 "SDL_OPENGL_ES_DRIVER.\n";
+        }
         return 1;
       }
       if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
-        std::cerr << "glad: failed to load GL functions\n";
+        std::cerr << "glad: failed to load GL functions for "
+                  << (gles_requested ? "OpenGL ES 3.0" : "OpenGL 3.3") << "\n";
         return 1;
       }
-      std::cout << "[GL] " << (const char *)glGetString(GL_RENDERER) << " | "
-                << (const char *)glGetString(GL_VERSION) << std::endl;
-      std::cout << "[GL] vendor=" << (const char *)glGetString(GL_VENDOR)
-                << " glsl=" << (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION)
-                << "\n";
+      const char *gl_version = (const char *)glGetString(GL_VERSION);
+      const char *gl_renderer = (const char *)glGetString(GL_RENDERER);
+      const char *gl_vendor = (const char *)glGetString(GL_VENDOR);
+      const char *gl_glsl =
+          (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+      const bool context_is_es =
+          gl_version && std::strstr(gl_version, "OpenGL ES") != nullptr;
+      int ctx_major = 0, ctx_minor = 0;
+      SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &ctx_major);
+      SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &ctx_minor);
+      std::cout << "[GL] " << (gl_renderer ? gl_renderer : "?") << " | "
+                << (gl_version ? gl_version : "?") << std::endl;
+      std::cout << "[GL] vendor=" << (gl_vendor ? gl_vendor : "?")
+                << " glsl=" << (gl_glsl ? gl_glsl : "?")
+                << " requested=" << (gles_requested ? "OpenGLES" : "OpenGL")
+                << " context=" << ctx_major << "." << ctx_minor << std::endl;
+
+      if (gles_requested) {
+        auto refuse = [&](const char *why) {
+          std::cerr << "[GL] OpenGL ES 3.0 is not usable: " << why
+                    << ". Refusing to fall back to desktop OpenGL."
+                    << std::endl;
+        };
+        if (!context_is_es) {
+          refuse("the created context is not an OpenGL ES context");
+          return 1;
+        }
+        if (ctx_major < 3 || !glad_glGenVertexArrays ||
+            !glad_glBindFramebuffer || !glad_glBlitFramebuffer ||
+            !glad_glCopyTexImage2D || !glad_glFramebufferTexture2D ||
+            !glad_glRenderbufferStorage || !glad_glReadPixels ||
+            !glad_glTexImage2D) {
+          refuse("required ES 3.0 entry points are missing");
+          return 1;
+        }
+        // ES 3.0 names for limits whose enums the desktop GLAD header does
+        // not expose.
+        constexpr GLenum kMaxVaryingVectors = 0x8DFC;
+        constexpr GLenum kMaxVertexUniformVectors = 0x8DFB;
+        constexpr GLenum kMaxFragmentUniformVectors = 0x8DFD;
+        GLint tex_units = 0, tex_size = 0, varyings = 0, fs_uniforms = 0,
+              vs_uniforms = 0, vertex_attribs = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &tex_units);
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &tex_size);
+        glGetIntegerv(kMaxVaryingVectors, &varyings);
+        glGetIntegerv(kMaxFragmentUniformVectors, &fs_uniforms);
+        glGetIntegerv(kMaxVertexUniformVectors, &vs_uniforms);
+        glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &vertex_attribs);
+        std::cout << "[GL] ES limits: tex_units=" << tex_units
+                  << " max_tex=" << tex_size << " varyings=" << varyings
+                  << " fs_uniforms=" << fs_uniforms
+                  << " vs_uniforms=" << vs_uniforms
+                  << " vertex_attribs=" << vertex_attribs << std::endl;
+        if (tex_units < 8 || tex_size < 1024 || varyings < 10 ||
+            vertex_attribs < 4 || fs_uniforms < 64 || vs_uniforms < 128) {
+          refuse("driver limits are below the TEV shader requirements");
+          return 1;
+        }
+      }
       // NWII_NO_VSYNC=1 keeps SDL_GL_SwapWindow from blocking on the display
       // link; without an active display (locked screen, headless CI) the wait
       // never completes and the whole guest stalls on vblank.
@@ -289,7 +432,8 @@ int main(int argc, char **argv) {
     glBindFramebuffer(GL_FRAMEBUFFER, efb_fbo);
     glGenTextures(1, &efb_tex);
     glBindTexture(GL_TEXTURE_2D, efb_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 640, 480, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 640, 480, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, efb_tex, 0);
@@ -297,15 +441,26 @@ int main(int argc, char **argv) {
 
       
       GLuint efb_depth_rbo = 0;
-      glGenRenderbuffers(1, &efb_depth_rbo);
-      glBindRenderbuffer(GL_RENDERBUFFER, efb_depth_rbo);
-      glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 640, 480);
-      glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                                GL_RENDERBUFFER, efb_depth_rbo);
-    }
-    {
-      
+      auto attach_depth = [&](GLenum format) {
+        if (efb_depth_rbo)
+          glDeleteRenderbuffers(1, &efb_depth_rbo);
+        glGenRenderbuffers(1, &efb_depth_rbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, efb_depth_rbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, format, 640, 480);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, efb_depth_rbo);
+      };
+      attach_depth(GL_DEPTH_COMPONENT24);
       GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+      if (st != GL_FRAMEBUFFER_COMPLETE) {
+        // Not every ES 3.0 driver exposes a 24-bit depth renderbuffer; the
+        // EFB only needs depth comparison, so a 16-bit attachment is a valid
+        // fallback rather than a silently incomplete framebuffer.
+        std::cout << "[GL] depth24 EFB incomplete (0x" << std::hex << st
+                  << std::dec << "); retrying depth16" << std::endl;
+        attach_depth(GL_DEPTH_COMPONENT16);
+        st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+      }
       std::cout << "[GL] EFB FBO status: 0x" << std::hex << st << std::dec
                 << (st == GL_FRAMEBUFFER_COMPLETE ? " (complete)" : " (INCOMPLETE!)")
                 << std::endl;
@@ -316,7 +471,8 @@ int main(int argc, char **argv) {
     glBindTexture(GL_TEXTURE_2D, xfb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    if (std::getenv("NWII_XFB") && !xfb_blit_init(xfb_blit))
+    if ((std::getenv("NWII_XFB") || gles_requested) &&
+        !xfb_blit_init(xfb_blit, gles_requested))
       std::cerr << "[XFB] disabling XFB present path (init failed)"
                 << std::endl;
 
@@ -989,7 +1145,7 @@ int main(int argc, char **argv) {
         }
         glBindTexture(GL_TEXTURE_2D, xfb_tex);
         if (xw != xfb_w || xh != xfb_h) {
-          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, xw, xh, 0, GL_RGBA, GL_UNSIGNED_BYTE, xfb_px.data());
+          glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, xw, xh, 0, GL_RGBA, GL_UNSIGNED_BYTE, xfb_px.data());
           xfb_w = xw; xfb_h = xh;
         } else {
           glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, xw, xh, GL_RGBA, GL_UNSIGNED_BYTE, xfb_px.data());
@@ -1118,6 +1274,18 @@ int main(int argc, char **argv) {
           glDrawArrays(GL_TRIANGLES, 0, 3);
           glBindVertexArray(0);
           glUseProgram(0);
+        } else if (gles_requested && xfb_blit.prog != 0) {
+          // ES drivers are not required to accept a blit between an RGBA8 FBO
+          // and the window's native format (ANGLE rejects it). Present the EFB
+          // texture with the same fullscreen-triangle shader instead.
+          glUseProgram(xfb_blit.prog);
+          glActiveTexture(GL_TEXTURE0);
+          glBindTexture(GL_TEXTURE_2D, efb_tex);
+          if (xfb_blit.sampler >= 0) glUniform1i(xfb_blit.sampler, 0);
+          glBindVertexArray(xfb_blit.vao);
+          glDrawArrays(GL_TRIANGLES, 0, 3);
+          glBindVertexArray(0);
+          glUseProgram(0);
         } else {
           glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
           glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -1149,7 +1317,8 @@ int main(int argc, char **argv) {
             if (xfb_present) {
               // Capture what is actually on screen: the presented XFB quad.
               glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-              glReadBuffer(GL_BACK);
+              // The default framebuffer's read buffer is BACK; setting it is
+              // unnecessary and not portable to every ES implementation.
               glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
             } else {
               glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);

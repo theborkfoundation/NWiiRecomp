@@ -8,7 +8,27 @@
 
 namespace nwii::runtime::gx {
 
-GeneratedShader GenerateTEVShader(const GXState& state, uint8_t prim_type) {
+namespace {
+
+void EmitShaderPreamble(std::stringstream& s, ShaderDialect dialect,
+                        bool fragment) {
+    if (dialect == ShaderDialect::OpenGLES) {
+        s << "#version 300 es\n";
+        // Fragment shaders have no default float precision in GLSL ES; the
+        // vertex defaults are highp but state them for both stages.
+        s << "precision highp float;\n";
+        s << "precision highp int;\n";
+        if (fragment)
+            s << "precision highp sampler2D;\n";
+    } else {
+        s << "#version 330 core\n";
+    }
+}
+
+} // namespace
+
+GeneratedShader GenerateTEVShader(const GXState& state, uint8_t prim_type,
+                                  ShaderDialect dialect) {
     GeneratedShader shader;
 
     
@@ -17,7 +37,7 @@ GeneratedShader GenerateTEVShader(const GXState& state, uint8_t prim_type) {
 
     
     std::stringstream vs;
-    vs << "#version 330 core\n";
+    EmitShaderPreamble(vs, dialect, false);
 
     
     
@@ -116,7 +136,7 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     shader.vertex_source = vs.str();
 
     std::stringstream fs;
-    fs << "#version 330 core\n";
+    EmitShaderPreamble(fs, dialect, true);
     fs << "in vec4 vColor0;\n";
     fs << "in vec4 vColor1;\n";
     fs << "in vec2 vTex0;\n";

@@ -6,6 +6,13 @@ include(FetchContent)
 # generator and produce the same GL 3.3 core loader (glad1 keeps the
 # glad/glad.h + gladLoadGLLoader API this code uses). Either way the result is
 # a `glad` target nwiiruntime links against.
+#
+# The same loader serves the OpenGL ES 3.0 profile: glad1 resolves every
+# declared entry point by name from the active SDL context (it strips the
+# "OpenGL ES" version prefix), and the runtime uses only the GL/ES common
+# subset. GLES-only code paths avoid desktop-only calls (glGetTexImage is
+# replaced by a framebuffer readback), so one loader is reproducible for both
+# profiles and no second, colliding loader is linked.
 set(NWII_VENDORED_GLAD "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/glad")
 if(EXISTS "${NWII_VENDORED_GLAD}/src/glad.c")
     add_library(glad STATIC "${NWII_VENDORED_GLAD}/src/glad.c")
@@ -75,6 +82,40 @@ add_library(nwiiruntime STATIC
 )
 
 target_link_libraries(nwiiruntime PUBLIC SDL2-static tomlplusplus::tomlplusplus glad)
+
+# OpenGL ES 3.0 shares the GL renderer and loader. Keep an explicit switch so a
+# build can refuse the profile instead of silently producing a GL-only binary;
+# the runtime reports the refusal when "OpenGLES" is selected.
+option(NWII_ENABLE_GLES "Enable the OpenGL ES 3.0 rendering profile" ON)
+if(NWII_ENABLE_GLES)
+    target_compile_definitions(nwiiruntime PUBLIC NWII_ENABLE_GLES=1)
+else()
+    target_compile_definitions(nwiiruntime PUBLIC NWII_ENABLE_GLES=0)
+endif()
+
+# macOS has no native OpenGL ES driver; ANGLE supplies ES 3.0 on top of Metal.
+# SDL loads libEGL/libGLESv2 dynamically by name, so point it at the chosen
+# distribution at build time. The runtime only sets SDL's driver paths when the
+# caller has not set them already.
+set(NWII_ANGLE_DIR "" CACHE PATH
+    "ANGLE directory containing libEGL.dylib and libGLESv2.dylib (macOS)")
+if(NWII_ANGLE_DIR)
+    if(NOT APPLE)
+        message(FATAL_ERROR
+            "NWII_ANGLE_DIR is currently supported for the macOS ANGLE dylibs "
+            "only; set SDL_VIDEO_GL_DRIVER/SDL_VIDEO_EGL_DRIVER at run time for "
+            "other platforms.")
+    endif()
+    if(NOT EXISTS "${NWII_ANGLE_DIR}/libEGL.dylib" OR
+       NOT EXISTS "${NWII_ANGLE_DIR}/libGLESv2.dylib")
+        message(FATAL_ERROR
+            "NWII_ANGLE_DIR must contain libEGL.dylib and libGLESv2.dylib: "
+            "${NWII_ANGLE_DIR}")
+    endif()
+    target_compile_definitions(nwiiruntime PUBLIC
+        NWII_ANGLE_DIR="${NWII_ANGLE_DIR}")
+    message(STATUS "OpenGL ES via ANGLE: ${NWII_ANGLE_DIR}")
+endif()
 
 if(APPLE)
     find_library(COCOA_LIBRARY Cocoa)

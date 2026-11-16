@@ -14,6 +14,7 @@ enum class Platform {
 
 enum class Backend {
     OpenGL,
+    OpenGLES,
     Metal
 };
 

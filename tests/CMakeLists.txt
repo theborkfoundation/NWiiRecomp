@@ -47,6 +47,14 @@ add_executable(recompiler_cmake_test recompiler_cmake_test.cpp)
 target_link_libraries(recompiler_cmake_test PRIVATE nwiirecomp_lib)
 add_test(NAME recompiler_cmake COMMAND recompiler_cmake_test)
 
+add_executable(config_backend_test config_backend_test.cpp)
+target_link_libraries(config_backend_test PRIVATE nwiiruntime)
+add_test(NAME config_backend COMMAND config_backend_test)
+
+add_executable(shader_dialect_test shader_dialect_test.cpp)
+target_link_libraries(shader_dialect_test PRIVATE nwiiruntime)
+add_test(NAME shader_dialect COMMAND shader_dialect_test)
+
 add_executable(device_bounds_test device_bounds_test.cpp)
 target_link_libraries(device_bounds_test PRIVATE nwiiruntime)
 add_test(NAME device_bounds COMMAND device_bounds_test)
