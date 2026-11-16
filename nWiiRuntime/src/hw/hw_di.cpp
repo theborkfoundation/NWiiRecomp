@@ -77,12 +77,15 @@ static void di_execute() {
                       << nwii::runtime::g_ctx_ptr->lr << std::dec << "\n";
         }
         if (nwii::runtime::g_mmu && length > 0 && length < 0x4000000) {
+            // VirtualDisc::read() zero-fills the whole destination, so a
+            // region gap is already zero. Do not treat the total covered byte
+            // count as a contiguous prefix: that would erase valid data that
+            // follows a gap in the disc layout.
             std::vector<uint8_t> tmp(length, 0);
             size_t actual = vd.read(offset, length, tmp.data());
             if (actual < length) {
                 std::cout << "[VDisc] MISS: read off=0x" << std::hex << offset
                           << " len=0x" << length << " covered=0x" << actual << " (no file region)\n";
-                std::memset(tmp.data() + actual, 0, length - actual);
             }
             for (uint32_t i = 0; i < length; ++i)
                 nwii::runtime::g_mmu->write8(dst + i, tmp[i]);

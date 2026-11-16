@@ -1334,16 +1334,21 @@ void Recompiler::emit_instruction(
       if (dec_ctr)
         out << "    ctx.ctr--;\n";
 
-      if (ppc_inst.lk() && target_reg == "ctx.lr") {
+      // PowerPC clears the low two bits of an indirect branch target, and the
+      // link register must be captured before bclrl overwrites it.
+      const bool lr_target = target_reg == "ctx.lr";
+      const std::string target_expr =
+          std::string("(") + target_reg + " & ~3u)";
+      if (ppc_inst.lk() && lr_target) {
         out << "    {\n";
-        out << "        uint32_t temp_lr = ctx.lr;\n";
+        out << "        const uint32_t target = " << target_expr << ";\n";
         out << "        ctx.lr = 0x" << std::hex << std::uppercase
             << (inst.address + 4) << std::dec << "; // save return address\n";
         if (cond_expr == "true") {
-          out << "        ctx.pc = temp_lr; return;\n";
+          out << "        ctx.pc = target; return;\n";
         } else {
           out << "        if (" << cond_expr
-              << ") { ctx.pc = temp_lr; return; }\n";
+              << ") { ctx.pc = target; return; }\n";
         }
         out << "    }\n";
       } else {
@@ -1352,22 +1357,21 @@ void Recompiler::emit_instruction(
               << (inst.address + 4) << std::dec << "; // save return address\n";
         }
 
-        
-        bool null_guard = ppc_inst.lk() && target_reg == "ctx.ctr";
+        bool null_guard = ppc_inst.lk() && !lr_target;
         if (cond_expr == "true") {
           if (null_guard)
-            out << "    if (" << target_reg << ") { ctx.pc = " << target_reg
+            out << "    if (" << target_expr << ") { ctx.pc = " << target_expr
                 << "; return; } else nwii::runtime::note_null_call(0x"
                 << std::hex << std::uppercase << inst.address << std::dec
                 << ", ctx.lr);\n";
           else
-            out << "    ctx.pc = " << target_reg << "; return;\n";
+            out << "    ctx.pc = " << target_expr << "; return;\n";
         } else {
           if (null_guard)
-            out << "    if ((" << cond_expr << ") && " << target_reg
-                << ") { ctx.pc = " << target_reg << "; return; }\n";
+            out << "    if ((" << cond_expr << ") && " << target_expr
+                << ") { ctx.pc = " << target_expr << "; return; }\n";
           else
-            out << "    if (" << cond_expr << ") { ctx.pc = " << target_reg
+            out << "    if (" << cond_expr << ") { ctx.pc = " << target_expr
                 << "; return; }\n";
         }
       }
@@ -1491,6 +1495,8 @@ void Recompiler::emit_instruction(
           << " << \" at 0x\" << std::hex << ctx.pc << std::dec << \"\\n\"; "
              "std::exit(1);\n";
     }
+    if (ppc_inst.value() & 1)
+      out << "    ctx.update_cr1(); // record form: CR1 from FPSCR\n";
   } else if (ppc_inst.opcode() == 63) {
     uint32_t xo = (ppc_inst.value() >> 1) & 0x3FF;
     uint32_t fD = ppc_inst.rd();
@@ -1600,6 +1606,8 @@ void Recompiler::emit_instruction(
           << " << \" at 0x\" << std::hex << ctx.pc << std::dec << \"\\n\"; "
              "std::exit(1);\n";
     }
+    if (ppc_inst.value() & 1)
+      out << "    ctx.update_cr1(); // record form: CR1 from FPSCR\n";
   } else if (ppc_inst.opcode() == 20) {
     
     uint32_t rS = ppc_inst.rs();
@@ -1788,37 +1796,43 @@ void Recompiler::emit_instruction(
         out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
             << "], ctx.gpr[" << rS << "]); // stwx\n";
     } else if (xo == 40) {
-      out << "    ctx.gpr[" << rD << "] = ctx.gpr[" << rB << "] - ctx.gpr["
-          << rA << "]; // subf\n";
+      out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        ctx.gpr[" << rD << "] = b - a; // subf\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rB
-            << "] - (int64_t)(int32_t)ctx.gpr[" << rA << "];\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // subfo\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)b - "
+               "(int64_t)(int32_t)a;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // subfo\n";
       }
       if (ppc_inst.value() & 1) {
-        out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
+        out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
+      out << "    }\n";
     } else if (xo == 235) {
-      out << "    ctx.gpr[" << rD << "] = ctx.gpr[" << rA << "] * ctx.gpr["
-          << rB << "]; // mullw\n";
+      out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        ctx.gpr[" << rD << "] = a * b; // mullw\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rA
-            << "] * (int64_t)(int32_t)ctx.gpr[" << rB << "];\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // mullwo\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)a * "
+               "(int64_t)(int32_t)b;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // mullwo\n";
       }
       if (ppc_inst.value() & 1) {
-        out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
+        out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
+      out << "    }\n";
     } else if (xo == 491) {
       out << "    if (ctx.gpr[" << rB << "] != 0) {\n";
       out << "      const int32_t a = (int32_t)ctx.gpr[" << rA
@@ -1937,203 +1951,220 @@ void Recompiler::emit_instruction(
       }
     } else if (xo == 10) { 
       out << "    {\n";
-      out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA
-          << "] + (uint64_t)ctx.gpr[" << rB << "];\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        const uint64_t sum = (uint64_t)a + (uint64_t)b;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rA << "] + (int64_t)(int32_t)ctx.gpr[" << rB << "];\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // addco\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)a + "
+               "(int64_t)(int32_t)b;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // addco\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 8) { 
       out << "    {\n";
-      out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)(~ctx.gpr[" << rA
-          << "]) + (uint64_t)ctx.gpr[" << rB << "] + 1;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        const uint64_t sum = (uint64_t)(~a) + (uint64_t)b + 1;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rB << "] - (int64_t)(int32_t)ctx.gpr[" << rA << "];\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // subfco\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)b - "
+               "(int64_t)(int32_t)a;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // subfco\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 104) { 
       // Unsigned negation gives the wrapped 32-bit result without host UB for
       // INT32_MIN. nego additionally reports the overflow in XER.
-      out << "    ctx.gpr[" << rD << "] = 0u - ctx.gpr[" << rA << "]; // neg\n";
-      if (oe) {
-        out << "    { const bool ov = (ctx.gpr[" << rA << "] == 0x80000000u);\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // nego\n";
-      }
-      if (ppc_inst.value() & 1) {
-        out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
-            << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
-            << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
-      }
-    } else if (xo == 266) { 
-      out << "    ctx.gpr[" << rD << "] = ctx.gpr[" << rA << "] + ctx.gpr["
-          << rB << "]; // add\n";
-      if (oe) {
-        out << "    { const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
-            << rB << "], r = ctx.gpr[" << rD << "];\n";
-        out << "      const bool ov = ((~(a ^ b) & (a ^ r)) & 0x80000000u) != 0;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // addo\n";
-      }
-      if (ppc_inst.value() & 1) {
-        out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
-            << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
-            << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
-      }
-    } else if (xo == 138) { 
       out << "    {\n";
-      out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA
-          << "] + (uint64_t)ctx.gpr[" << rB
-          << "] + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "];\n";
+      out << "        ctx.gpr[" << rD << "] = 0u - a; // neg\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rA << "] + (int64_t)(int32_t)ctx.gpr[" << rB << "] + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // addeo\n";
+        out << "        const bool ov = (a == 0x80000000u);\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // nego\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+      }
+      out << "    }\n";
+    } else if (xo == 266) { 
+      out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        const uint32_t r = a + b;\n";
+      out << "        ctx.gpr[" << rD << "] = r; // add\n";
+      if (oe) {
+        out << "        const bool ov = ((~(a ^ b) & (a ^ r)) & 0x80000000u) != 0;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // addo\n";
+      }
+      if (ppc_inst.value() & 1) {
+        out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
+            << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
+            << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+      }
+      out << "    }\n";
+    } else if (xo == 138) { 
+      out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
+      out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
+      out << "        const uint64_t sum = (uint64_t)a + (uint64_t)b + "
+             "(uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
+      if (oe) {
+        out << "        const int64_t exact = (int64_t)(int32_t)a + "
+               "(int64_t)(int32_t)b + (int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // addeo\n";
+      }
+      if (ppc_inst.value() & 1) {
+        out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
+            << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
+            << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 136) { 
       out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "], b = ctx.gpr["
+          << rB << "];\n";
       out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)(~ctx.gpr[" << rA
-          << "]) + (uint64_t)ctx.gpr[" << rB
-          << "] + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint64_t sum = (uint64_t)(~a) + (uint64_t)b + "
+             "(uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rB << "] - (int64_t)(int32_t)ctx.gpr[" << rA << "] - 1 + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // subfeo\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)b - "
+               "(int64_t)(int32_t)a - 1 + (int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // subfeo\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 202) { 
       out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "];\n";
       out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA
-          << "] + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint64_t sum = (uint64_t)a + (uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rA << "] + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // addzeo\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)a + "
+               "(int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // addzeo\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 200) { 
       out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "];\n";
       out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)(~ctx.gpr[" << rA
-          << "]) + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint64_t sum = (uint64_t)(~a) + (uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = -(int64_t)(int32_t)ctx.gpr[" << rA << "] - 1 + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // subfzeo\n";
+        out << "        const int64_t exact = -(int64_t)(int32_t)a - 1 + "
+               "(int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // subfzeo\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 234) { 
       out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "];\n";
       out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA
-          << "] + 0xFFFFFFFFULL + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint64_t sum = (uint64_t)a + 0xFFFFFFFFULL + "
+             "(uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = (int64_t)(int32_t)ctx.gpr[" << rA << "] - 1 + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // addmeo\n";
+        out << "        const int64_t exact = (int64_t)(int32_t)a - 1 + "
+               "(int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // addmeo\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 232) { 
       out << "    {\n";
+      out << "        const uint32_t a = ctx.gpr[" << rA << "];\n";
       out << "        const uint32_t ca = (ctx.xer >> 29) & 1;\n";
-      out << "        uint64_t res = (uint64_t)(~ctx.gpr[" << rA
-          << "]) + 0xFFFFFFFFULL + (uint64_t)ca;\n";
-      out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
-      out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
-             "29); // Set CA bit\n";
+      out << "        const uint64_t sum = (uint64_t)(~a) + 0xFFFFFFFFULL + "
+             "(uint64_t)ca;\n";
+      out << "        ctx.gpr[" << rD << "] = (uint32_t)sum;\n";
+      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | "
+             "((uint32_t)((sum >> 32) & 1) << 29); // Set CA bit\n";
       if (oe) {
-        out << "    { const int64_t exact = -(int64_t)(int32_t)ctx.gpr[" << rA << "] - 2 + (int64_t)ca;\n";
-        out << "      const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
-        out << "      ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
-        out << "      if (ov) ctx.xer |= 0x80000000u; } // subfmeo\n";
+        out << "        const int64_t exact = -(int64_t)(int32_t)a - 2 + "
+               "(int64_t)ca;\n";
+        out << "        const bool ov = exact > INT32_MAX || exact < INT32_MIN;\n";
+        out << "        ctx.xer = (ctx.xer & ~0x40000000u) | (ov ? 0x40000000u : 0u);\n";
+        out << "        if (ov) ctx.xer |= 0x80000000u; // subfmeo\n";
       }
       if (ppc_inst.value() & 1) {
         out << "        ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rD
             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rD
             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rD << "] == 0);\n";
-            out << "    ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
+        out << "        ctx.cr[0].so = (ctx.xer >> 31) & 1;\n";
       }
       out << "    }\n";
     } else if (xo == 83) { 

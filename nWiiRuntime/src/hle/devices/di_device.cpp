@@ -70,8 +70,16 @@ public:
         } else if (cmd == 0x71 || cmd == 0x8D) {
             // DVDLowRead / DVDLowUnencryptedRead (Dolphin DI layout):
             
+            if (req.in_size > 0 && req.in_size < 12)
+                return IPC_EINVAL; // request structure cannot be read
+
             uint32_t in = di_phys_to_virt(req.in_buf);
             uint32_t length = ctx.mmu.read32(in + 4);
+            // The requested transfer may never exceed the caller's output
+            // buffer. Without this, the length embedded in the request drove
+            // the write past out_size.
+            if (req.out_size > 0 && length > req.out_size)
+                length = req.out_size;
             uint64_t offset = (uint64_t)ctx.mmu.read32(in + 8) << 2;
             uint32_t dst = di_phys_to_virt(req.out_buf);
 
@@ -85,21 +93,22 @@ public:
                           << " dst=0x" << dst << std::dec << std::endl;
             }
 
-            if (dst >= 0x80000000 && dst < 0x94000000 && length > 0 && length < 0x4000000) {
-                uint8_t* target = ctx.mmu.get_ptr(dst);
-                if (target && vd.valid()) {
-                    vd.read(offset, length, target);
+            if (length == 0)
+                return 1;
+            if (length >= 0x4000000 || !ctx.mmu.range_is_ram(dst, length))
+                return IPC_EINVAL; // destination is not one contiguous RAM span
+
+            uint8_t* target = ctx.mmu.get_ptr(dst);
+            if (target && vd.valid()) {
+                vd.read(offset, length, target);
+            } else {
+                std::vector<uint8_t> tmp(length);
+                if (vd.valid() && vd.read(offset, length, tmp.data())) {
+                    for (uint32_t i = 0; i < length; ++i)
+                        ctx.mmu.write8(dst + i, tmp[i]);
                 } else {
-                    std::vector<uint8_t> tmp(length);
-                    if (vd.valid() && vd.read(offset, length, tmp.data())) {
-                        for (uint32_t i = 0; i < length; ++i)
-                            ctx.mmu.write8(dst + i, tmp[i]);
-                    } else {
-                   
-                    
                     di_read_internal_shared(&ctx.mmu, req.in_buf, req.out_buf, 0, 0, false,
                                             req.out_size);
-                }
                 }
             }
             return 1; 

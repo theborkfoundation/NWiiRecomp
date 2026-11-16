@@ -485,6 +485,7 @@ bool interpret_one(CPUContext& ctx) {
                       << std::hex << pc << std::dec << " (nop)\n";
             break;
         }
+        if (rc) ctx.update_cr1();
         break;
     }
     case 63: { 
@@ -521,12 +522,12 @@ bool interpret_one(CPUContext& ctx) {
         }
         case 12: ctx.fpr[rD] = (float)b; break;                        
         case 14: { 
-            uint64_t bits = (uint32_t)(int32_t)std::nearbyint(b);
+            uint64_t bits = (uint32_t)guest_fctiw(b, ctx.fpscr, false);
             std::memcpy(&ctx.fpr[rD], &bits, 8);
             break;
         }
         case 15: { 
-            uint64_t bits = (uint32_t)(int32_t)b;
+            uint64_t bits = (uint32_t)guest_fctiw(b, ctx.fpscr, true);
             std::memcpy(&ctx.fpr[rD], &bits, 8);
             break;
         }
@@ -548,6 +549,7 @@ bool interpret_one(CPUContext& ctx) {
                       << std::hex << pc << std::dec << " (nop)\n";
             break;
         }
+        if (rc) ctx.update_cr1();
         break;
     }
     case 4: { 

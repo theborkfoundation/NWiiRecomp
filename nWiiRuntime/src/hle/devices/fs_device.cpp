@@ -377,8 +377,16 @@ public:
         if (slot >= 0 && slot < VNAND_FD_MAX && g_vnand_handles[slot].open) {
             auto& h = g_vnand_handles[slot];
             auto& f = g_vnand_files[h.file_idx];
-            if (h.pos + len > f.data.size())
-                f.data.resize(h.pos + len, 0);
+            // h.pos + len can wrap in 32 bits before the size check, after
+            // which the write loop would index past the (small) vector. Bound
+            // the end in 64 bits and reject growth beyond the virtual NAND's
+            // file-size limit.
+            constexpr uint64_t kMaxVnandFileSize = 0x4000000; // 64 MiB
+            const uint64_t end = (uint64_t)h.pos + len;
+            if (end > kMaxVnandFileSize)
+                return ISFS_EINVAL;
+            if (end > f.data.size())
+                f.data.resize((size_t)end, 0);
 
             uint32_t virt_ptr = buf;
             if (virt_ptr < 0x01800000 || (virt_ptr >= 0x10000000 && virt_ptr < 0x14000000))

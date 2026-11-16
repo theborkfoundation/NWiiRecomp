@@ -86,7 +86,9 @@ inline int32_t guest_fctiw(double v, uint32_t fpscr, bool truncate) {
   if (truncate) {
     r = std::trunc(v);
   } else {
-    switch ((fpscr >> 30) & 3u) {  // RN: 0 nearest, 1 zero, 2 +inf, 3 -inf
+    // RN is the low two bits of the stored FPSCR (PowerPC bits 30-31 in
+    // MSB-first numbering).
+    switch (fpscr & 3u) {  // RN: 0 nearest, 1 zero, 2 +inf, 3 -inf
     case 0: r = std::nearbyint(v); break;
     case 1: r = std::trunc(v); break;
     case 2: r = std::ceil(v); break;
@@ -151,6 +153,22 @@ struct MMU {
       return mem2_ptr + offset2;
     }
     return nullptr;
+  }
+
+  // True when [addr, addr+len) lies entirely inside one contiguous RAM
+  // region. get_ptr() validates only the first byte, so bulk transfers through
+  // a host pointer must check the whole span (and use 64-bit arithmetic to
+  // make the end check wrap-safe).
+  inline bool range_is_ram(uint32_t addr, uint32_t len) const {
+    if (len == 0)
+      return false;
+    const uint32_t paddr = addr & 0x3FFFFFFF;
+    if (paddr < 0x01800000u)
+      return (uint64_t)paddr + len <= 0x01800000u;
+    const uint32_t offset2 = paddr - 0x10000000u;
+    if (offset2 < 0x04000000u)
+      return (uint64_t)offset2 + len <= 0x04000000u;
+    return false;
   }
 
   inline bool is_hw_reg(uint32_t paddr) const {
@@ -651,6 +669,15 @@ struct CPUContext {
   // leaves the high 32 bits undefined; use Dolphin's signalling-NaN prefix so
   // the value survives stfd/lfd round trips bit-exactly.
   uint64_t mffs_bits() const { return 0xFFF8000000000000ull | fpscr; }
+
+  // Record-form floating-point instructions copy the FPSCR exception summary
+  // bits into CR1: FX, FEX, VX and OX map to lt, gt, eq and so.
+  void update_cr1() {
+    cr[1].lt = (fpscr & 0x80000000u) != 0; // FX
+    cr[1].gt = (fpscr & 0x40000000u) != 0; // FEX
+    cr[1].eq = (fpscr & 0x20000000u) != 0; // VX
+    cr[1].so = (fpscr & 0x10000000u) != 0; // OX
+  }
 
   // mtfsf writes the FPSCR nibbles selected by the 8-bit field mask.
   void mtfsf(uint32_t fm, uint32_t value) {

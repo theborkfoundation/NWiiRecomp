@@ -357,16 +357,21 @@ static void di_read_internal(nwii::runtime::MMU *mmu, uint32_t inbuf, uint32_t o
   }
 
   uint32_t buf_ptr = phys_to_virt(addr);
-  uint32_t total_length = transferSize * 2048;
-  if (length > 0 && length < total_length)
-    total_length = length;
-  if (total_length == 0 && length > 0)
-    total_length = length;
-  if (total_length == 0)
-    total_length = 0x440;
+  uint64_t total = (uint64_t)transferSize * 2048;
+  if (length > 0 && length < total)
+    total = length;
+  if (total == 0 && length > 0)
+    total = length;
+  if (total == 0)
+    total = 0x440;
   
-  if (out_size > 0 && total_length > out_size)
-    total_length = out_size;
+  if (out_size > 0 && total > out_size)
+    total = out_size;
+  // Bound host allocations and bulk copies; the hardware DI path uses the
+  // same limit.
+  if (total > 0x4000000)
+    total = 0x4000000;
+  const uint32_t total_length = (uint32_t)total;
 
   if (nwii::runtime::log_on(nwii::runtime::LOG_DEBUG)) {
     std::cout << "[HLE IOS] DI_Read final: offset=0x" << std::hex
@@ -380,7 +385,11 @@ static void di_read_internal(nwii::runtime::MMU *mmu, uint32_t inbuf, uint32_t o
   bool have_media = (file && file->is_open()) || VirtualDisc::get().valid();
 
   if (have_media && buf_ptr != 0 && total_length > 0) {
-    uint8_t* dst = mmu->get_ptr(buf_ptr);
+    // get_ptr() only validates the first byte; a bulk copy must stay inside
+    // one contiguous RAM region or it runs past the backing vector.
+    uint8_t* dst = mmu->range_is_ram(buf_ptr, total_length)
+                       ? mmu->get_ptr(buf_ptr)
+                       : nullptr;
     if (dst) {
       read_disc_data(dst, (uint32_t)offset, total_length);
       bytes_read = total_length;

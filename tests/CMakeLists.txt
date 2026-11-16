@@ -46,3 +46,20 @@ add_test(NAME recompiler_resume COMMAND recompiler_resume_test)
 add_executable(recompiler_cmake_test recompiler_cmake_test.cpp)
 target_link_libraries(recompiler_cmake_test PRIVATE nwiirecomp_lib)
 add_test(NAME recompiler_cmake COMMAND recompiler_cmake_test)
+
+add_executable(device_bounds_test device_bounds_test.cpp)
+target_link_libraries(device_bounds_test PRIVATE nwiiruntime)
+add_test(NAME device_bounds COMMAND device_bounds_test)
+
+add_executable(translator_semantics_generator translator_semantics_generator.cpp)
+target_link_libraries(translator_semantics_generator PRIVATE nwiirecomp_lib)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/translator_semantics.inc"
+    COMMAND translator_semantics_generator "${CMAKE_CURRENT_BINARY_DIR}/translator_semantics.inc"
+    DEPENDS translator_semantics_generator
+    VERBATIM)
+add_executable(translator_semantics_test translator_semantics_test.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/translator_semantics.inc")
+target_include_directories(translator_semantics_test PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/nWiiRuntime/include")
+target_link_libraries(translator_semantics_test PRIVATE nwiiruntime)
+add_test(NAME translator_semantics COMMAND translator_semantics_test)

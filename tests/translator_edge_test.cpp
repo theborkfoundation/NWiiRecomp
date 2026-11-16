@@ -26,10 +26,11 @@ static int failures = 0;
   } while (0)
 
 static void test_fctiw() {
-  const uint32_t RN_NEAREST = 0u << 30;
-  const uint32_t RN_ZERO = 1u << 30;
-  const uint32_t RN_PINF = 2u << 30;
-  const uint32_t RN_NINF = 3u << 30;
+  // FPSCR.RN is the low two bits of the stored register.
+  const uint32_t RN_NEAREST = 0u;
+  const uint32_t RN_ZERO = 1u;
+  const uint32_t RN_PINF = 2u;
+  const uint32_t RN_NINF = 3u;
 
   // NaN and out-of-range values saturate instead of invoking host UB.
   CHECK(nwii::runtime::guest_fctiw(std::numeric_limits<double>::quiet_NaN(),
@@ -46,6 +47,28 @@ static void test_fctiw() {
   CHECK(nwii::runtime::guest_fctiw(2.5, RN_ZERO, false) == 2);
   CHECK(nwii::runtime::guest_fctiw(2.5, RN_PINF, false) == 3);
   CHECK(nwii::runtime::guest_fctiw(-2.5, RN_NINF, false) == -3);
+}
+
+static void test_fctiw_uses_guest_fpscr() {
+  nwii::runtime::CPUContext ctx;
+  ctx.mtfsfi(7, 2); // round toward +infinity
+  CHECK(ctx.fpscr == 2u);
+  CHECK(nwii::runtime::guest_fctiw(2.1, ctx.fpscr, false) == 3);
+  ctx.mtfsfi(7, 3); // round toward -infinity
+  CHECK(nwii::runtime::guest_fctiw(-2.1, ctx.fpscr, false) == -3);
+  // Exception summary bits must not change the selected rounding mode.
+  ctx.fpscr = 0x30000002u;
+  CHECK(nwii::runtime::guest_fctiw(2.1, ctx.fpscr, false) == 3);
+}
+
+static void test_cr1_record_form() {
+  nwii::runtime::CPUContext ctx;
+  ctx.fpscr = 0xA0000000u; // FX and VX set
+  ctx.update_cr1();
+  CHECK(ctx.cr[1].lt && !ctx.cr[1].gt && ctx.cr[1].eq && !ctx.cr[1].so);
+  ctx.fpscr = 0x50000000u; // FEX and OX set
+  ctx.update_cr1();
+  CHECK(!ctx.cr[1].lt && ctx.cr[1].gt && !ctx.cr[1].eq && ctx.cr[1].so);
 }
 
 static void test_reservation(MMU &mmu) {
@@ -74,6 +97,8 @@ static void test_reservation(MMU &mmu) {
 
 int main() {
   test_fctiw();
+  test_fctiw_uses_guest_fpscr();
+  test_cr1_record_form();
   MMU mmu;
   nwii::runtime::g_mmu = &mmu;
   test_reservation(mmu);
