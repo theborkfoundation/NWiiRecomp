@@ -212,6 +212,11 @@ int main(int argc, char **argv) {
   const bool gles_requested =
       nwii::runtime::Config::get().backend ==
       nwii::runtime::Backend::OpenGLES;
+  // The periodic [STAT] probe reads the EFB back to the CPU (1.2 MB) and
+  // scans every pixel; glReadPixels also stalls the pipeline. That is costly on
+  // low-end devices, so the probe is opt-in via NWII_STATS=1.
+  const char *stats_env = std::getenv("NWII_STATS");
+  const bool stats_enabled = stats_env && stats_env[0] == '1';
 
   SDL_Window* window = nullptr;
   SDL_GLContext gl_ctx = nullptr;
@@ -1169,88 +1174,91 @@ int main(int argc, char **argv) {
         if (std::chrono::duration_cast<std::chrono::seconds>(now - t0).count() >=
             5) {
           t0 = now;
-          extern uint64_t g_stat_frames, g_stat_draws;
-          extern uint64_t g_stat_parse_us, g_stat_render_us;
-          extern uint64_t nwii_stat_hash0(), nwii_stat_shaders();
-          std::vector<unsigned char> p(640 * 480 * 4);
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
-          glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, p.data());
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-          size_t nonblack = 0;
-          for (size_t i = 0; i < p.size(); i += 4)
-            if (p[i] | p[i + 1] | p[i + 2])
-              ++nonblack;
-          std::cout << "[STAT] " << ++stat_n * 5 << "s frames=" << std::dec
-                    << g_stat_frames << " draws=" << g_stat_draws
-                    << " vi=" << nwii::runtime::hw::g_vi_trigger_count
-                    << " parse_ms=" << g_stat_parse_us / 1000
-                    << " render_ms=" << g_stat_render_us / 1000
-                    << " efb_nonblack=" << nonblack << "/307200"
-                    << " shaders=" << nwii_stat_shaders() << " hash0=0x"
-                    << std::hex << nwii_stat_hash0();
-          g_stat_parse_us = 0;
-          g_stat_render_us = 0;
+          if (stats_enabled) {
+            extern uint64_t g_stat_frames, g_stat_draws;
+            extern uint64_t g_stat_parse_us, g_stat_render_us;
+            extern uint64_t nwii_stat_hash0(), nwii_stat_shaders();
+            std::vector<unsigned char> p(640 * 480 * 4);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
+            glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, p.data());
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            size_t nonblack = 0;
+            for (size_t i = 0; i < p.size(); i += 4)
+              if (p[i] | p[i + 1] | p[i + 2])
+                ++nonblack;
+            std::cout << "[STAT] " << ++stat_n * 5 << "s frames=" << std::dec
+                      << g_stat_frames << " draws=" << g_stat_draws
+                      << " vi=" << nwii::runtime::hw::g_vi_trigger_count
+                      << " parse_ms=" << g_stat_parse_us / 1000
+                      << " render_ms=" << g_stat_render_us / 1000
+                      << " efb_nonblack=" << nonblack << "/307200"
+                      << " shaders=" << nwii_stat_shaders() << " hash0=0x"
+                      << std::hex << nwii_stat_hash0();
+            g_stat_parse_us = 0;
+            g_stat_render_us = 0;
 
-          std::cout << " E0..E7=";
-          for (int i = 0xE0; i <= 0xE7; ++i)
-            std::cout << nwii::runtime::gx::g_state.bp[i] << ",";
+            std::cout << " E0..E7=";
+            for (int i = 0xE0; i <= 0xE7; ++i)
+              std::cout << nwii::runtime::gx::g_state.bp[i] << ",";
 
-          // Anything the runtime silently discarded in the last period shows up
-          // here, whether or not diagnostics were requested.
-          std::cout << std::dec << " projType="
-                    << nwii::runtime::gx::g_state.projType
-                    << " projSet=" << (int)nwii::runtime::gx::g_state.projSet
-                    << " proj=";
-          for (int i = 0; i < 6; ++i)
-            std::cout << nwii::runtime::gx::g_state.projection[i] << ",";
+            // Anything the runtime silently discarded in the last period shows up
+            // here, whether or not diagnostics were requested.
+            std::cout << std::dec << " projType="
+                      << nwii::runtime::gx::g_state.projType
+                      << " projSet=" << (int)nwii::runtime::gx::g_state.projSet
+                      << " proj=";
+            for (int i = 0; i < 6; ++i)
+              std::cout << nwii::runtime::gx::g_state.projection[i] << ",";
 
           
-          uint32_t base = nwii::runtime::gx::g_state.texStages[0].base_addr;
-          uint32_t toff = nwii::runtime::gx::g_state.texStages[0].tlut_offset;
-          uint32_t tex_nz = 0, tlut_nz = 0;
-          if (nwii::runtime::g_ctx_ptr) {
-            for (uint32_t i = 0; i < 2048; ++i)
-              if (nwii::runtime::g_ctx_ptr->mmu.read8(base + i))
-                ++tex_nz;
-          }
-          for (uint32_t i = 0; i < 512; ++i) {
-            uint32_t idx = toff + i;
-            if (idx < sizeof(nwii::runtime::gx::g_state.tlutMem) &&
-                nwii::runtime::gx::g_state.tlutMem[idx])
-              ++tlut_nz;
-          }
-          std::cout << " tex0=" << std::hex << base << std::dec << "/"
-                    << nwii::runtime::gx::g_state.texStages[0].width << "x"
-                    << nwii::runtime::gx::g_state.texStages[0].height << "/f"
-                    << (int)nwii::runtime::gx::g_state.texStages[0].format
-                    << " texnz=" << tex_nz << "/2048 tlutnz=" << tlut_nz << "/512"
-                    << std::endl;
-
-          // Stuck-picture detector: identical framebuffer hash for several
-          // periods means the picture is not advancing, which is a different
-          // bug class from "renders the wrong thing".
-          {
-            static uint64_t last_hash = 0;
-            static size_t last_nb = (size_t)-1;
-            static int same = 0;
-            static bool warned = false;
-            uint64_t h = nwii_stat_hash0();
-            if (h == last_hash && nonblack == last_nb) {
-              if (++same >= 3 && !warned) {
-                warned = true;
-                std::cout << "[DIAG] *** picture unchanged for " << same * 5
-                          << "s (hash0=0x" << std::hex << h << std::dec
-                          << ", efb_nonblack=" << nonblack
-                          << "): the runtime is not advancing the frame"
-                          << std::endl;
-              }
-            } else {
-              same = 0;
-              warned = false;
+            uint32_t base = nwii::runtime::gx::g_state.texStages[0].base_addr;
+            uint32_t toff = nwii::runtime::gx::g_state.texStages[0].tlut_offset;
+            uint32_t tex_nz = 0, tlut_nz = 0;
+            if (nwii::runtime::g_ctx_ptr) {
+              for (uint32_t i = 0; i < 2048; ++i)
+                if (nwii::runtime::g_ctx_ptr->mmu.read8(base + i))
+                  ++tex_nz;
             }
-            last_hash = h;
-            last_nb = nonblack;
-          }
+            for (uint32_t i = 0; i < 512; ++i) {
+              uint32_t idx = toff + i;
+              if (idx < sizeof(nwii::runtime::gx::g_state.tlutMem) &&
+                  nwii::runtime::gx::g_state.tlutMem[idx])
+                ++tlut_nz;
+            }
+            std::cout << " tex0=" << std::hex << base << std::dec << "/"
+                      << nwii::runtime::gx::g_state.texStages[0].width << "x"
+                      << nwii::runtime::gx::g_state.texStages[0].height << "/f"
+                      << (int)nwii::runtime::gx::g_state.texStages[0].format
+                      << " texnz=" << tex_nz << "/2048 tlutnz=" << tlut_nz << "/512"
+                      << std::endl;
+
+            // Stuck-picture detector: identical framebuffer hash for several
+            // periods means the picture is not advancing, which is a different
+            // bug class from "renders the wrong thing".
+            {
+              static uint64_t last_hash = 0;
+              static size_t last_nb = (size_t)-1;
+              static int same = 0;
+              static bool warned = false;
+              uint64_t h = nwii_stat_hash0();
+              if (h == last_hash && nonblack == last_nb) {
+                if (++same >= 3 && !warned) {
+                  warned = true;
+                  std::cout << "[DIAG] *** picture unchanged for " << same * 5
+                            << "s (hash0=0x" << std::hex << h << std::dec
+                            << ", efb_nonblack=" << nonblack
+                            << "): the runtime is not advancing the frame"
+                            << std::endl;
+                }
+              } else {
+                same = 0;
+                warned = false;
+              }
+              last_hash = h;
+              last_nb = nonblack;
+            }
+
+          } // NWII_STATS
 
           nwii::runtime::diag::report("stat");
           nwii::runtime::diag::begin_period();

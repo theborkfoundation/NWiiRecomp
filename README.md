@@ -214,7 +214,14 @@ Useful environment variables:
 ```bash
 NWII_HEADLESS=1      # run without a window, log-only (boot debugging)
 NWII_TRACE_CALLS=1   # print every recompiled function entry
+NWII_STATS=1         # periodic [STAT] probe; off by default because it reads
+                     # 1.2 MB back to the CPU every 5 s
 ```
+
+The periodic `[STAT]` probe is opt-in for that reason. Screenshots
+(`NWII_SCREENSHOT`), texture dumps (`NWII_TEXDUMP`), XFB presentation
+(`NWII_XFB`) and logo step dumps (`NWII_LOGO_STEPS`) are also diagnostic
+readbacks and should stay off in performance runs.
 
 ---
 
