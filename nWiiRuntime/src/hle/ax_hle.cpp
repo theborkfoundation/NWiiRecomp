@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -268,15 +269,33 @@ void AXHle::process_pbs(uint32_t addr) {
   static int dbg_list = 0;
   const bool dbg = axdbg() && dbg_list < 2;
   int voices = 0, running = 0, with_updates = 0, start_updates = 0;
+  // The AX library starts voices through the per-millisecond update lists
+  // instead of writing PB.running directly. Apply them before mixing.
+  // This ucode's updates field is a different size (the bytes here overlap
+  // vol_env), so only trust update lists when explicitly enabled.
+  static const bool use_updates = std::getenv("NWII_AXUPD") != nullptr;
+  static std::unordered_map<uint32_t, bool> last_run;
   while (addr) {
+    // Most of the 96-voice graph is idle on every AX frame. Reading and
+    // writing each 0x140-byte PB through per-halfword MMU calls consumes the
+    // whole 3 ms guest audio period on slow ARM cores and starves the game.
+    // Peek at running/next and skip the idle block entirely.
+    if (!use_updates) {
+      const uint16_t run = rd16(addr + guest_off(offsetof(ax::AXPBWii, running)));
+      if (run != 1 && !last_run[addr]) {
+        const uint16_t nhi =
+            rd16(addr + guest_off(offsetof(ax::AXPBWii, next_pb_hi)));
+        const uint16_t nlo =
+            rd16(addr + guest_off(offsetof(ax::AXPBWii, next_pb_lo)));
+        if (++voices > 200)
+          break;
+        addr = hilo(nhi, nlo);
+        continue;
+      }
+    }
+
     ax::AXPBWii pb;
     read_pb(addr, pb);
-
-    // The AX library starts voices through the per-millisecond update lists
-    // instead of writing PB.running directly. Apply them before mixing.
-    // This ucode's updates field is a different size (the bytes here overlap
-    // vol_env), so only trust update lists when explicitly enabled.
-    static const bool use_updates = std::getenv("NWII_AXUPD") != nullptr;
     const uint16_t n0 = use_updates ? pb.updates.num_updates[0] : 0;
     const uint16_t n1 = use_updates ? pb.updates.num_updates[1] : 0;
     const uint16_t n2 = use_updates ? pb.updates.num_updates[2] : 0;
@@ -310,7 +329,6 @@ void AXHle::process_pbs(uint32_t addr) {
         }
         start += counts[ms];
         {
-          static std::unordered_map<uint32_t, bool> last_run;
           const bool started = pb.running == 1 && !last_run[addr];
           const bool stopped = pb.running != 1 && last_run[addr];
           if (started)
@@ -339,7 +357,6 @@ void AXHle::process_pbs(uint32_t addr) {
       }
     } else {
       {
-        static std::unordered_map<uint32_t, bool> last_run;
         const bool started = pb.running == 1 && !last_run[addr];
         const bool stopped = pb.running != 1 && last_run[addr];
         if (started)

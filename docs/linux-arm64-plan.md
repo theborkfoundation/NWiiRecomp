@@ -70,15 +70,23 @@ Done:
 - The executable linked against the sysroot's SDL2 2.32.4 via pkg-config:
   `ELF 64-bit LSB executable, ARM aarch64`.
 - The default (fetched SDL2) macOS build still passes `ctest` 10/10.
+- The cross-built binary runs on an Orange Pi Zero 3 (Ubuntu 24.04.5 arm64,
+  glibc 2.39, SDL2 2.30) with the game data. `readelf` shows the highest
+  required symbol is `GLIBC_2.17`, so the trixie sysroot does not force a newer
+  target userland.
+- Under Xvfb + Mesa llvmpipe the runtime gets OpenGL 4.5 / 3.3 core, renders
+  the Wii strap screen at 640x480, and advances through the intro.
+- SDL's default audio driver (PulseAudio, no `SDL_AUDIODRIVER` override) boots
+  and outputs non-silent audio after the AX idle-PB fast path, immediate DSP
+  mailbox delivery and DSP-side event-scheduler pump. SFX voices start and the
+  Pulse stream runs at 32 kHz.
 
 Pending:
 
-- Run the cross-built binary on arm64 hardware or an arm64 container: boot,
-  X11/Wayland/KMSDRM context creation, ES 3.0 shader compile/link, rendering,
-  audio, input, screenshots.
-- Match the sysroot suite to the target's glibc before deploying (the trixie
-  lock is glibc 2.41; older userlands need `--suite` + `--update-lock` or a
-  native build).
+- KMSDRM/EGL on the actual Mali/Panfrost GPU, Wayland, resizing, and a full
+  playthrough on target hardware.
+- The sysroot suite still needs to match older target glibc versions if newer
+  symbols are ever used; the current binary only needs 2.17.
 - Release binaries are ~160 MB after the default `-g0` (zig otherwise emits
   DWARF even at `-O3`; the unstripped debug build was ~796 MiB: 672 MiB DWARF
   plus ~146 MiB `.text`). Pass `-DNWII_ARM64_DEBUG_INFO=ON` when target symbols

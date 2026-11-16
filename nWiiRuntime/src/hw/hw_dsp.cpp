@@ -22,6 +22,7 @@ static uint16_t dsp_mbox_cpu_hi = 0;
 static uint16_t dsp_mbox_cpu_lo = 0;
 static uint16_t dsp_mbox_dsp_hi = 0;
 static uint16_t dsp_mbox_dsp_lo = 0;
+static bool dsp_mail_irq_pending = false;
 static uint32_t ar_mmaddr = 0;
 static uint32_t ar_araddr = 0;
 static uint32_t ar_cnt = 0;
@@ -39,6 +40,15 @@ static uint16_t ar_refresh = 0;
 
 
 static void dsp_update_pi();
+
+// The guest can sit in a DSP mailbox poll for a long time. The event
+// scheduler normally only advances from the IOS path, so AI/VI/mail timers
+// would otherwise miss their deadlines while the CPU thread is inside this
+// HLE. Drive it from DSP MMIO accesses as well.
+static void dsp_pump_events() {
+    if (g_ctx_ptr)
+        EventScheduler::get().advance(*g_ctx_ptr, g_ctx_ptr->read_timebase());
+}
 
 
 
@@ -159,6 +169,23 @@ static void dsp_update_pi() {
         clear_pi_interrupt(0x40);
 }
 
+// Make the reply visible to the guest before the interrupt arrives. The AX
+// library can poll the DSP mailbox in a tight loop; a reply that only exists
+// in a scheduled event is never seen if the guest never yields, which is the
+// boot-stall lost wakeup. The PI interrupt stays on the ucode-like 1 ms tick.
+static void deliver_dsp_mail(uint16_t lo) {
+    dsp_mbox_dsp_hi = 0xDCD1;
+    dsp_mbox_dsp_lo = lo;
+    dsp_mail_irq_pending = true;
+    EventScheduler::get().schedule_after(
+        g_ctx_ptr->tb_freq / 1000, [](CPUContext&, uint64_t) {
+            if (!dsp_mail_irq_pending)
+                return;
+            dsp_control |= 0x0080;
+            dsp_update_pi();
+        });
+}
+
 
 
 
@@ -178,11 +205,13 @@ int dsp_pending_os_interrupt() {
 void register_dsp(MMIODispatcher& dispatcher) {{
     dispatcher.register_region(0xCC005000, 0xCC0050FF,
         [](uint32_t addr) -> uint32_t {
+            dsp_pump_events();
             if (addr == 0xCC005000 || addr == 0xCC005002) return dsp_mbox_cpu_hi;
             if (addr == 0xCC005004) return dsp_mbox_dsp_hi;
             if (addr == 0xCC005006) {
                 uint16_t val = dsp_mbox_dsp_lo;
                 dsp_mbox_dsp_hi &= ~0x8000;
+                dsp_mail_irq_pending = false;
 
                 
                 
@@ -214,6 +243,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             return 0;
         },
         [](uint32_t addr, uint32_t val) {
+            dsp_pump_events();
             static const bool artrace = ([](){ static const bool s = (std::getenv("NWII_ARTRACE") != nullptr); return s; })();
             if (artrace && (addr & 0xFFF0) >= 0x5010 && (addr & 0xFFF0) < 0x5030)
                 std::cout << "[ARw] 0x" << std::hex << (addr & 0xFFFF)
@@ -240,28 +270,13 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                     // not consume (boot-ucode mails) keeps the old generic ack.
                     static const bool sink_ready = []() {
                         AXHle::get().set_mail_sink([](uint16_t lo) {
-                            // Deliver slightly later, like the ucode interrupt:
-                            // replying inside the CPU's mailbox write is re-entrant.
-                            EventScheduler::get().schedule_after(
-                                g_ctx_ptr->tb_freq / 1000, [lo](CPUContext&, uint64_t) {
-                                    dsp_mbox_dsp_hi = 0xDCD1;
-                                    dsp_mbox_dsp_lo = lo;
-                                    dsp_control |= 0x0080;
-                                    dsp_update_pi();
-                                });
+                            deliver_dsp_mail(lo);
                         });
                         return true;
                     }();
                     (void)sink_ready;
-                    if (!AXHle::get().handle_mail(mail)) {
-                        EventScheduler::get().schedule_after(
-                            g_ctx_ptr->tb_freq / 1000, [](CPUContext&, uint64_t) {
-                                dsp_mbox_dsp_hi = 0xDCD1;
-                                dsp_mbox_dsp_lo = 0x0000;
-                                dsp_control |= 0x0080;
-                                dsp_update_pi();
-                            });
-                    }
+                    if (!AXHle::get().handle_mail(mail))
+                        deliver_dsp_mail(0x0000);
                 }
                 if (([](){ static const bool s = (std::getenv("NWII_DSPTRACE") != nullptr); return s; })())
                     std::cout << "[DSPm] cpu mail write @" << std::hex

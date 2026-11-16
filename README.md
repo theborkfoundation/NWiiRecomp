@@ -243,6 +243,9 @@ Run on the target:
 - Cross builds default to `-g0`: zig emits DWARF even at `-O3`, which turns the
   ~160 MB release executable into an ~800 MB one. Pass
   `-DNWII_ARM64_DEBUG_INFO=ON` when you need target symbols.
+- On a headless ARM64 target, Xvfb + Mesa llvmpipe provides the GL context;
+  SDL's default audio driver (PulseAudio/ALSA) is used. No
+  `SDL_AUDIODRIVER=disk` workaround is needed after the AX idle-PB fix.
 
 On a native Debian/Ubuntu arm64 host, install `build-essential cmake
 ninja-build pkg-config libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev` and use
