@@ -510,8 +510,9 @@ int main(int argc, char **argv) {
   if (!exe.load_unpacked_game(argv[1]))
     return 1;
   // The game id (and therefore the per-game quirk profile) is only known once
-  // boot.bin has been read.
-  nwii::runtime::Config::get().load_game_profile();
+  // boot.bin has been read. The profile is required.
+  if (!nwii::runtime::Config::get().load_game_profile())
+    return 1;
 
   uint32_t arena_lo = 0x80000000;
   

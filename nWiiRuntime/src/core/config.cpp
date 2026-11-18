@@ -120,7 +120,7 @@ void Config::load(const std::string& filepath) {
     }
 }
 
-void Config::load_game_profile() {
+bool Config::load_game_profile() {
     
     std::vector<std::string> search_paths = {
         "assets/games/" + game_id + ".toml",
@@ -136,8 +136,13 @@ void Config::load_game_profile() {
     }
 
     if (found_path.empty()) {
-        std::cout << "[Config] No game profile for " << game_id << " (using defaults)." << std::endl;
-        return;
+        std::cerr << "[Config] Required game profile for " << game_id
+                  << " was not found. Refusing to start.\n"
+                  << "[Config] Searched:";
+        for (const auto& p : search_paths)
+            std::cerr << "\n  " << p;
+        std::cerr << std::endl;
+        return false;
     }
 
     try {
@@ -187,7 +192,9 @@ void Config::load_game_profile() {
     } catch (const toml::parse_error& err) {
         std::cerr << "[Config] Failed to parse game profile " << found_path
                   << ":\n" << err << std::endl;
+        return false;
     }
+    return true;
 }
 
 } 

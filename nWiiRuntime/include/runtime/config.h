@@ -53,7 +53,7 @@ public:
     void load(const std::string& filepath);
 
     
-    void load_game_profile();
+    bool load_game_profile();
 
     Platform platform = Platform::Wii;
     Backend backend = Backend::OpenGL;
