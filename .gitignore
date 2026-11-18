@@ -54,3 +54,10 @@ third_party/dolphin-sigdb/totaldb.dsy
 
 # Development scratch: screenshots, dumps, logs, throwaway notes
 .dev/
+
+# Imported wii-lie project data
+games/
+export_rayman_origins/
+.commandcode/
+PROGRESS.md
+!recomp_config_rayman.toml
