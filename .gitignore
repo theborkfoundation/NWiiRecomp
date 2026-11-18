@@ -60,4 +60,5 @@ games/
 export_rayman_origins/
 .commandcode/
 PROGRESS.md
+BUG_REPORT.md
 !recomp_config_rayman.toml
