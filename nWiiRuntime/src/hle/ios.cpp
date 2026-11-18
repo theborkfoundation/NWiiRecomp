@@ -810,7 +810,12 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
     ctx.mmu.write64(c + 0x90 + i * 8, d);
   }
   ctx.mmu.write32(c + 0x194, ctx.fpscr);
-  ctx.mmu.write32(c + 0x198, ctx.pc);  
+  // 0xFFFFFFFC is the context-switch sentinel. The address to resume is in
+  // srr0; saving the sentinel makes hle_load_context_from_guest restore
+  // 0xFFFFFFFC forever (post-intro black screen at frame ~3712).
+  uint32_t saved_pc =
+      (ctx.pc == 0xFFFFFFFC && ctx.srr0 != 0) ? ctx.srr0 : ctx.pc;
+  ctx.mmu.write32(c + 0x198, saved_pc);
   ctx.mmu.write32(c + 0x19C, ctx.msr); 
   for (int i = 0; i < 8; i++)
     ctx.mmu.write32(c + 0x1A4 + i * 4, ctx.gqr[i]);
@@ -922,6 +927,8 @@ bool process_pending_callbacks(CPUContext &ctx) {
                 << " cur=0x" << ctx.mmu.read32(0x800000E4)
                      << " d4=0x" << ctx.mmu.read32(0x800000D4) << " msr=0x" << ctx.msr << " imr=0x" << nwii::runtime::hw::pi_intmr.load() << " isr=0x" << nwii::runtime::hw::pi_intsr.load()
                      << " runq=0x" << (ctx.gpr[13] >= 0x80000000u ? ctx.mmu.read32(ctx.gpr[13] - 24944) : 0u)
+                     << " pcb=" << ctx.pending_cb_count.load(std::memory_order_relaxed)
+                     << " stable=" << (dispatch_context_is_stable(ctx) ? 1 : 0)
                      << std::dec << "\n";
     }
   }
@@ -975,6 +982,8 @@ bool process_pending_callbacks(CPUContext &ctx) {
                     << "\n";
       }
       ctx.mmu.write32(0x800000D4, ctx.dispatch_saved_ctx);
+      // Restore the thread that was interrupted, not the callback's issuer.
+      ctx.mmu.write32(0x800000E4, ctx.dispatch_saved_ctx);
       ctx.dispatch_saved_ctx = 0;
     }
     if (hle_load_context_from_guest(ctx)) {
@@ -1567,11 +1576,22 @@ bool process_pending_callbacks(CPUContext &ctx) {
   if (ctx.dispatch_saved_ctx != 0)
     return false;
 
-  if (!dispatch_context_is_stable(ctx))
-    return false;
-
   if (ctx.pending_cb_count.load(std::memory_order_relaxed) == 0)
     return false;
+
+  if (!dispatch_context_is_stable(ctx)) {
+    // A callback queued while a temporary current-context was published can
+    // otherwise be deferred forever: if the CPU has reached the idle thread,
+    // that temporary frame is gone and nothing will restore a stable context.
+    // Publish the idle thread's own context and take the callback now.
+    if (ctx.pc == 0x80006ccc) {
+      uint32_t cur = ctx.mmu.read32(0x800000E4);
+      if (cur != 0)
+        ctx.mmu.write32(0x800000D4, cur);
+    }
+    if (!dispatch_context_is_stable(ctx))
+      return false;
+  }
 
   CallbackInfo cb;
   {
@@ -1591,10 +1611,24 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
+  uint32_t dispatch_ctx = current_ctx;
+  // A callback queued by the main thread can be picked up while the idle
+  // thread is current. Running it against the idle context leaves the issuing
+  // thread blocked after its wakeup; dispatch against the issuer instead.
+  if (ctx.pc == 0x80006ccc && cb.thread != 0 && cb.thread != current_ctx) {
+    dispatch_ctx = cb.thread;
+    // OSGetCurrentThread() reads 0x800000E4, not 0x800000D4. The IOS callback
+    // must see the issuing thread, otherwise its wakeup lands on the idle
+    // thread and the main thread stays blocked. The idle context is still the
+    // one saved and restored around the callback.
+    ctx.mmu.write32(0x800000E4, dispatch_ctx);
+  }
   if (std::getenv("NWII_DBG_CTX")) {
     static int n = 0;
     if (n++ < 100)
       std::cout << "[CbCall] current_ctx=0x" << std::hex << current_ctx
+                << " dispatch_ctx=0x" << dispatch_ctx
+                << " thread=0x" << cb.thread
                 << " cb=0x" << cb.cb_addr << " pc=0x" << ctx.pc
                 << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
                 << " depth=" << std::dec << ctx.callback_depth

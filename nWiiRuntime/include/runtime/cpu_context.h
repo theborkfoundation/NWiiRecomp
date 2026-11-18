@@ -63,6 +63,9 @@ struct CallbackInfo {
     uint32_t arg1;
     uint32_t arg2;
     bool is_irq;
+    // Thread that submitted the async request. If the callback is later taken
+    // from the idle thread, it must still run against this context.
+    uint32_t thread;
 };
 
 
@@ -716,7 +719,7 @@ struct CPUContext {
 
   void queue_callback(uint32_t cb, uint32_t arg1, uint32_t arg2, bool is_irq = false) {
     std::lock_guard<std::mutex> lock(cb_mutex);
-    pending_callbacks.push({cb, arg1, arg2, is_irq});
+    pending_callbacks.push({cb, arg1, arg2, is_irq, mmu.read32(0x800000E4)});
     pending_cb_count.fetch_add(1, std::memory_order_relaxed);
   }
 
