@@ -813,8 +813,14 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
   // 0xFFFFFFFC is the context-switch sentinel. The address to resume is in
   // srr0; saving the sentinel makes hle_load_context_from_guest restore
   // 0xFFFFFFFC forever (post-intro black screen at frame ~3712).
+#if defined(__APPLE__)
+  static const bool s_srr0_restore = std::getenv("NWII_SRR0") != nullptr;
+#else
+  static const bool s_srr0_restore = true;
+#endif
   uint32_t saved_pc =
-      (ctx.pc == 0xFFFFFFFC && ctx.srr0 != 0) ? ctx.srr0 : ctx.pc;
+      (s_srr0_restore && ctx.pc == 0xFFFFFFFC && ctx.srr0 != 0) ? ctx.srr0
+                                                                : ctx.pc;
   ctx.mmu.write32(c + 0x198, saved_pc);
   ctx.mmu.write32(c + 0x19C, ctx.msr); 
   for (int i = 0; i < 8; i++)
