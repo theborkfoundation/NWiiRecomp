@@ -106,6 +106,15 @@ size_t dsp_audio_pull(int16_t* out, size_t frames) {
     adma_ring.erase(adma_ring.begin(), adma_ring.begin() + n * 2);
     if (n < frames)
         std::memset(out + n * 2, 0, (frames - n) * 2 * sizeof(int16_t));
+    nwii::runtime::perf::audio_frames.fetch_add(n, std::memory_order_relaxed);
+    for (size_t i = 0; i < n * 2; ++i) {
+        int v = std::abs((int)out[i]);
+        int prev = nwii::runtime::perf::audio_peak.load(std::memory_order_relaxed);
+        while (v > prev &&
+               !nwii::runtime::perf::audio_peak.compare_exchange_weak(
+                   prev, v, std::memory_order_relaxed))
+            ;
+    }
     static const bool s_audiodbg =
         std::getenv("NWII_AXTONE") != nullptr || std::getenv("NWII_SNDLOG") != nullptr;
     if (s_audiodbg) {

@@ -467,6 +467,7 @@ static inline void wgp_push(uint8_t b) {
     }
 
     g_hw_fifo.push_back(b);
+    nwii::runtime::perf::fifo_bytes.fetch_add(1, std::memory_order_relaxed);
     ++g_wgp_total_bytes;
 
     // Raw draw-sync fallback. The parser can lose command boundaries on a

@@ -1,6 +1,7 @@
 #include "runtime/texture_cache_gl.h"
 #include "runtime/config.h"
 #include "runtime/diagnostics.h"
+#include "runtime/perf_counters.h"
 #include <iostream>
 #include <cstring>
 #include <cstdio>
@@ -238,8 +239,10 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
                       stage.format, stage.tlut_offset, stage.tlut_format, hash};
     auto it = cache.find(key);
     if (it != cache.end()) {
+        nwii::runtime::perf::texture_hits.fetch_add(1, std::memory_order_relaxed);
         return it->second;
     }
+    nwii::runtime::perf::texture_misses.fetch_add(1, std::memory_order_relaxed);
 
     if (cache.size() > 512)
         clear();
@@ -317,6 +320,7 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     UnloadImage(img);
 
     cache[key] = tex;
+    nwii::runtime::perf::texture_uploads.fetch_add(1, std::memory_order_relaxed);
     return tex;
 }
 

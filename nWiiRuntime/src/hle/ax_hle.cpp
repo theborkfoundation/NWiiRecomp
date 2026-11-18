@@ -417,6 +417,8 @@ void AXHle::process_pbs(uint32_t addr) {
     if (voices > 200)
       break;
   }
+  nwii::runtime::perf::audio_voices.store((uint32_t)running,
+                                          std::memory_order_relaxed);
   if (axdbg() && dbg_list < 2) {
     std::printf("[AX] PROCESS voices=%d running=%d with_updates=%d start=%d\n",
                 voices, running, with_updates, start_updates);

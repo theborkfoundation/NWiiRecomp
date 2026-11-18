@@ -25,6 +25,7 @@
 #include "runtime/movie_audio.h"
 #include "runtime/hw/hw.h"
 #include "runtime/diagnostics.h"
+#include "runtime/perf_overlay.h"
 
 namespace nwii::runtime {
     namespace hw { extern uint32_t g_vi_top_field_base; }
@@ -1349,6 +1350,9 @@ int main(int argc, char **argv) {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
           }
         }
+
+        nwii::runtime::perf::on_present();
+        nwii::runtime::perf::draw(draw_w, draw_h);
 
         static bool s_vsync_enabled = false;
         extern uint64_t g_stat_draws;

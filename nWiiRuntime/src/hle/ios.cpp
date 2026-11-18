@@ -873,6 +873,8 @@ static bool hle_load_context_from_guest(CPUContext &ctx) {
     std::cout << "[Load] c=0x" << std::hex << c << " -> pc=0x" << ctx.pc
               << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1] << std::dec << "\n";
   }
+  nwii::runtime::perf::context_restores.fetch_add(1,
+                                                  std::memory_order_relaxed);
   return true;
 }
 
@@ -963,6 +965,8 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.gpr[3] = 0;
       ctx.lr = 0xFFFFFFFC;
       ctx.pc = g_resched_addr;
+      nwii::runtime::perf::reschedules.fetch_add(1,
+                                                 std::memory_order_relaxed);
       dbg_disp("resched", g_resched_addr, 0, ctx);
       return true;
     }

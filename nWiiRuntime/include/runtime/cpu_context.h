@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime/perf_counters.h"
 #include <array>
 #include <cmath>
 #include <chrono>
@@ -721,6 +722,7 @@ struct CPUContext {
     std::lock_guard<std::mutex> lock(cb_mutex);
     pending_callbacks.push({cb, arg1, arg2, is_irq, mmu.read32(0x800000E4)});
     pending_cb_count.fetch_add(1, std::memory_order_relaxed);
+    perf::callbacks.fetch_add(1, std::memory_order_relaxed);
   }
 
   void psq_load(uint32_t frD, uint32_t addr, uint32_t W, uint32_t I) {
