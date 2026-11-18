@@ -96,7 +96,7 @@ When user reported input not working, analysis of the game's internal disassembl
 ---
 
 ## 4. Current Status & Verification
-- **Runtime Sync**: `NWiiRecomp/nWiiRuntime` and `export_rayman_origins/nWiiRuntime` are 100% synchronized (0 diff).
+- **Runtime Sync**: `nWiiRuntime` and `games/rayman_origins/export/nWiiRuntime` are 100% synchronized (0 diff).
 - **Rendering & Audio**: The Wii strap/safety screen renders correctly at ~100 FPS
   (`efb_nonblack=307196/307200`, 491 frames in 5 s, zero error-class events, `NWII_STRICT=1` exits 0).
 - **Input Responsiveness**: Both Keyboard/Mouse and Gamepad fully functional in menus, strap screens, and gameplay.
@@ -232,7 +232,7 @@ failures per run went from 6-12 to 0.
 
 ### Tools added
 
-`NWiiRecomp/tools/doldis.py <main.dol> <start> <end> [--hex]` -- section-aware disassembly by
+`tools/doldis.py <main.dol> <start> <end> [--hex]` -- section-aware disassembly by
 address. A plain `addr - 0x80006a40` file offset only works inside the first DOL
 text section, and capstone stops at the paired-single opcodes this title uses
 everywhere, so `--hex` is the fallback for those stretches.

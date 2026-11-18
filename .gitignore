@@ -57,7 +57,6 @@ third_party/dolphin-sigdb/totaldb.dsy
 
 # Imported wii-lie project data
 games/
-export_rayman_origins/
 .commandcode/
 PROGRESS.md
 BUG_REPORT.md

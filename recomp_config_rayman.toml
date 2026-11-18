@@ -1,10 +1,10 @@
 project_name = "RaymanOrigins"
-input_game_dir = "/Users/bachnx/Projects/wii-lie/games/rayman_origins"
-output_dir = "/Users/bachnx/Projects/wii-lie/export_rayman_origins"
-runtime_source_dir = "/Users/bachnx/Projects/wii-lie/NWiiRecomp/nWiiRuntime"
+input_game_dir = "/Users/bachnx/Projects/wii-lie/games/rayman_origins/data"
+output_dir = "/Users/bachnx/Projects/wii-lie/games/rayman_origins/export"
+runtime_source_dir = "/Users/bachnx/Projects/wii-lie/nWiiRuntime"
 split_output = true
 instructions_per_file = 20000
-sdk_sigdb = "/Users/bachnx/Projects/wii-lie/NWiiRecomp/third_party/dolphin-sigdb/totaldb.dsy"
+sdk_sigdb = "/Users/bachnx/Projects/wii-lie/third_party/dolphin-sigdb/totaldb.dsy"
 
 # SOJE41: the worker can complete before thread creation returns on native CPUs.
 # Publish pending before bctrl; preserve the worker's zero when publishing its handle.

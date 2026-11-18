@@ -1,8 +1,8 @@
 # Rayman Origins (SOJE41)
 
 `rayman_origins.toml` expects a legally obtained, unpacked game at
-`../games/rayman_origins`. Run the compiler from the repository root. The
-configuration writes `../export_rayman_origins`.
+`../games/rayman_origins/data`. Run the compiler from the repository root. The
+configuration writes `../games/rayman_origins/export`.
 
 The first two `instruction_overrides` repair an engine startup-task publication race:
 the worker can finish before thread creation returns. It clears its pending
@@ -21,8 +21,8 @@ compiled as code; use only configuration you trust.
 Run the game from its build directory so shaders resolve:
 
 ```sh
-cd ../export_rayman_origins/build
-./RaymanOrigins ../../games/rayman_origins
+cd ../games/rayman_origins/export/build
+./RaymanOrigins ../../data
 ```
 
 Regression checks are documented in `tests/README.md`. The current build has been run through the remote instructions to an interactive

@@ -40,7 +40,7 @@ NWiiRecomp translates Nintendo Wii/GameCube (`.dol`, `.elf`) executables into na
 ## Project Structure
 
 ```
-NWiiRecomp/
+wii-lie/
 ├── nWiiAnalyzer/   — DOL/ELF parser and function boundary analyzer
 ├── nWiiRecomp/     — Offline static recompiler (PPC → C++)
 ├── nWiiRuntime/    — Cross-platform runtime + HLE library
@@ -215,7 +215,7 @@ Configure a generated export (or this project) for Linux ARM64:
 
 ```bash
 cmake -B build-arm64 -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/NWiiRecomp/cmake/toolchains/linux-arm64-zig.cmake \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/wii-lie/cmake/toolchains/linux-arm64-zig.cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DNWII_SYSTEM_SDL2=ON \
   -DNWII_ENABLE_GLES=ON
