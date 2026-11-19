@@ -56,6 +56,17 @@ int main() {
   require(ctx.pc == resume && ctx.lr == link && ctx.gpr[1] == stack);
   require(ctx.gpr[3] == 0x12345678 && ctx.dispatch_saved_ctx == 0);
 
+  // The guest scheduler can call a hook with interrupts disabled while its
+  // current context still names the thread it is switching to. Rescheduling
+  // here would save the hook into that context and make it loop forever.
+  ctx.pc = 0x80018180;
+  ctx.msr = 0x32;
+  ctx.ext_resched_pending = true;
+  require(!process_pending_callbacks(ctx));
+  require(ctx.pc == 0x80018180 && ctx.ext_resched_pending);
+  require(ctx.dispatch_saved_ctx == 0);
+  require(ctx.mmu.read32(thread + 0x198) == resume);
+
   // An idle PC must be resolved before it can be saved for rescheduling.
   ctx.pc = 0;
   ctx.ext_resched_pending = true;
@@ -74,5 +85,6 @@ int main() {
   ctx.mmu.write32(0x800000d4, 0);
   require(!process_pending_callbacks(ctx));
   require(ctx.pc == sentinel && ctx.ext_resched_pending);
+
   return 0;
 }

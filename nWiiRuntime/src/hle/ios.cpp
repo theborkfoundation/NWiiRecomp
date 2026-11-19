@@ -956,6 +956,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
     return hle_load_context_from_guest(ctx);
   }
   if (ctx.ext_resched_pending && g_resched_addr && !ctx.in_callback &&
+      (ctx.msr & 0x8000u) != 0 &&
       ctx.pc != 0 && ctx.pc != 0xFFFFFFFC && ctx.dispatch_saved_ctx == 0 &&
       dispatch_context_is_stable(ctx)) {
     uint32_t current_ctx = ctx.mmu.read32(0x800000D4);

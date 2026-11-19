@@ -7,6 +7,14 @@
 
 namespace nwii::runtime::input {
 
+GamepadSource::~GamepadSource() {
+    // SDL_Quit closes controllers itself; do not use stale pointers after it.
+    if (SDL_WasInit(SDL_INIT_GAMECONTROLLER)) {
+        for (auto *controller : controllers_)
+            if (controller) SDL_GameControllerClose(controller);
+    }
+}
+
 void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
     auto& cfg = nwii::runtime::Config::get();
     int mode = cfg.input_mode;
@@ -17,10 +25,19 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
                          (std::getenv("NWII_HORIZONTAL") != nullptr);
 
     for (int i = 0; i < 4; ++i) {
-        if (!SDL_IsGameController(i))
+        auto *&controller = controllers_[i];
+        const bool recognized = SDL_IsGameController(i) == SDL_TRUE;
+        if (controller &&
+            (!recognized || !SDL_GameControllerGetAttached(controller) ||
+             SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)) !=
+                 SDL_JoystickGetDeviceInstanceID(i))) {
+            SDL_GameControllerClose(controller);
+            controller = nullptr;
+        }
+        if (!recognized)
             continue;
-            
-        SDL_GameController* controller = SDL_GameControllerOpen(i);
+        if (!controller)
+            controller = SDL_GameControllerOpen(i);
         if (!controller) continue;
 
         pads[i].err = 0;  
