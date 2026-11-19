@@ -3,6 +3,7 @@
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -960,14 +961,39 @@ bool process_pending_callbacks(CPUContext &ctx) {
       ctx.pc != 0 && ctx.pc != 0xFFFFFFFC && ctx.dispatch_saved_ctx == 0 &&
       dispatch_context_is_stable(ctx)) {
     uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
-    hle_save_context_to_guest(ctx, current_ctx);
-    ctx.dispatch_saved_ctx = current_ctx;
-    ctx.ext_resched_pending = false;
-    ctx.gpr[3] = 0;
-    ctx.lr = 0xFFFFFFFC;
-    ctx.pc = g_resched_addr;
-    nwii::runtime::perf::reschedules.fetch_add(1, std::memory_order_relaxed);
-    return true;
+    // SOJE41's SelectThread(0) returns immediately when the current thread is
+    // running and no higher-priority thread is queued, so saving and restoring
+    // a full OSContext for it is wasted work on every audio interrupt. Check
+    // that case first and only run the guest scheduler when it can actually
+    // pick a different thread. Other games, a remapped reschedule entry, or a
+    // non-running context fall through to the normal path.
+    //
+    // Thread-struct offsets (OSThread state +0x2C8, priority +0x2D0) and the
+    // RunQueueBits offset below are the RVL_SDK layout already assumed by the
+    // reschedule probe earlier in this function.
+    bool no_switch = false;
+    if (nwii::runtime::Config::get().game_id == "SOJE41" &&
+        g_resched_addr == 0x8009DD90 &&
+        current_ctx == ctx.mmu.read32(0x800000E4) &&
+        ctx.gpr[13] >= 0x80006170u && ctx.gpr[13] < 0x81800000u &&
+        ctx.mmu.read16(current_ctx + 0x2C8) == 2) {
+      const uint32_t priority = ctx.mmu.read32(current_ctx + 0x2D0);
+      const uint32_t ready = ctx.mmu.read32(ctx.gpr[13] - 24944);
+      // A set bit N in RunQueueBits means a thread with priority N is ready;
+      // the highest-priority ready thread therefore wins when the current
+      // thread's priority is at or above the lowest set bit.
+      no_switch = priority < 32 && priority <= std::countl_zero(ready);
+    }
+    if (!no_switch) {
+      hle_save_context_to_guest(ctx, current_ctx);
+      ctx.dispatch_saved_ctx = current_ctx;
+      ctx.ext_resched_pending = false;
+      ctx.gpr[3] = 0;
+      ctx.lr = 0xFFFFFFFC;
+      ctx.pc = g_resched_addr;
+      nwii::runtime::perf::reschedules.fetch_add(1, std::memory_order_relaxed);
+      return true;
+    }
   }
 
   if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
@@ -1014,6 +1040,15 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
   // Fast path: if not at a thread context switch (0xFFFFFFFC) or idle (0 or 0x80006ccc),
   // throttle hardware polling and interrupt scanning to periodic intervals.
+  //
+  // Note: 0x80006ccc (the RVL idle thread) is deliberately NOT throttled. The
+  // poll body drives per-call countdowns - ipc_tick() decrements
+  // g_ipc_interrupt_delay (5 and 50) and di_tick() g_di_interrupt_delay - so
+  // throttling the call rate changes the real-time delay before those
+  // interrupts are delivered. Measured on the Orange Pi Zero 3: adding the idle
+  // PC to the guard made boot reach the first drawn frame ~2 s later and drop
+  // frames. Fixing I-029 needs the countdowns moved to an instruction or
+  // wall-clock basis first, not a wider throttle here.
   if (ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc && ctx.pc != 0) {
     static thread_local uint64_t last_poll_inst = 0;
     if ((ctx.inst_count - last_poll_inst) < 2048) {

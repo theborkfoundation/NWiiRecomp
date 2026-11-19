@@ -57,18 +57,22 @@ void cp_process_fifo() {
     // CP_CR bit 0, those commands would never reach the parser while the vertex
     // data written straight to the write-gather pipe still would.
     {
+        // Only take the timestamp when the diagnostic is on: cp_process_fifo is
+        // called from every poll iteration on the CPU thread (and every
+        // present), and steady_clock::now() is ~53 ns on the A53 (I-031).
         static const bool cpstat = std::getenv("NWII_CPSTAT") != nullptr;
-        static auto t0 = std::chrono::steady_clock::now();
-        static int n = 0;
-        auto now = std::chrono::steady_clock::now();
-        if (cpstat &&
-            std::chrono::duration_cast<std::chrono::seconds>(now - t0).count() >= 1) {
-            t0 = now;
-            printf("[CPSTAT] %d cr=0x%08X base=0x%08X end=0x%08X wp=0x%08X rp=0x%08X "
-                   "hp=0x%08X drained_total=%llu\n",
-                   ++n, g_cp_cr.load(), g_cp_fifo_base, g_cp_fifo_end, g_cp_fifo_wp,
-                   g_cp_fifo_rp, g_cp_fifo_bp,
-                   (unsigned long long)g_cp_drained_total);
+        if (cpstat) {
+            static auto t0 = std::chrono::steady_clock::now();
+            static int n = 0;
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - t0).count() >= 1) {
+                t0 = now;
+                printf("[CPSTAT] %d cr=0x%08X base=0x%08X end=0x%08X wp=0x%08X rp=0x%08X "
+                       "hp=0x%08X drained_total=%llu\n",
+                       ++n, g_cp_cr.load(), g_cp_fifo_base, g_cp_fifo_end, g_cp_fifo_wp,
+                       g_cp_fifo_rp, g_cp_fifo_bp,
+                       (unsigned long long)g_cp_drained_total);
+            }
         }
     }
     if (!(g_cp_cr & 1)) return; 
