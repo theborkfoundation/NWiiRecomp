@@ -5,6 +5,7 @@
 #include <chrono>
 #include <csetjmp>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -605,8 +606,44 @@ struct CPUContext {
 
   
   uint64_t tb_freq = 40500000;
-  std::chrono::steady_clock::time_point tb_start =
-      std::chrono::steady_clock::now();
+  // Wall-clock origin in wall_ticks() units; see read_timebase().
+  uint64_t tb_start = wall_ticks();
+
+  // Monotonic wall clock in cheap ticks. On aarch64 the architected counter is
+  // a single `mrs cntvct_el0` (~8.6 ns measured on the A53) where
+  // steady_clock::now() goes through the vDSO and costs ~53 ns, and
+  // read_timebase() sits on the emulator's hot path. NWII_STEADYTB=1 forces the
+  // portable path, for kernels or sandboxes that trap EL0 counter reads.
+  static uint64_t wall_ticks() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    static const bool s_steady = std::getenv("NWII_STEADYTB") != nullptr;
+    if (!s_steady) {
+      uint64_t v;
+      asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+      return v;
+    }
+#endif
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  // Ticks per second for wall_ticks().
+  static uint64_t wall_ticks_per_sec() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    static const bool s_steady = std::getenv("NWII_STEADYTB") != nullptr;
+    if (!s_steady) {
+      static const uint64_t s_freq = [] {
+        uint64_t v;
+        asm volatile("mrs %0, cntfrq_el0" : "=r"(v));
+        return v;
+      }();
+      if (s_freq)
+        return s_freq;
+    }
+#endif
+    return 1000000000ull;
+  }
 
   
 
@@ -621,10 +658,11 @@ struct CPUContext {
         std::getenv("NWII_INSTTB") != nullptr;
     if (inst)
       return inst_count;
-    uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now() - tb_start)
-                      .count();
-    return us / 1000000 * tb_freq + us % 1000000 * tb_freq / 1000000;
+    // Split into whole seconds and remainder before scaling so the product
+    // stays inside 64 bits for the life of a session.
+    const uint64_t tps = wall_ticks_per_sec();
+    const uint64_t d = wall_ticks() - tb_start;
+    return d / tps * tb_freq + d % tps * tb_freq / tps;
   }
 
   

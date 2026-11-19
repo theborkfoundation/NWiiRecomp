@@ -23,6 +23,9 @@ public:
     const std::vector<uint8_t>& boot_data() const { return m_boot_data; }
     bool is_wii() const { return m_is_wii; }
 
+    // True when the FST entry is a .bik movie (used by NWII_SKIP_VIDEOS).
+    bool is_video_entry(uint32_t index) const;
+
 private:
     VirtualDisc() = default;
 
@@ -45,6 +48,11 @@ private:
 
     std::string m_cached_path;
     FILE* m_cached_file = nullptr;
+    // FST indices of .bik entries, for NWII_SKIP_VIDEOS.
+    std::vector<uint32_t> m_video_entries;
 };
+
+// NWII_SKIP_VIDEOS: true when this DVDFastOpen argument is a movie file.
+bool skip_movie_entry(uint32_t entrynum);
 
 } 
