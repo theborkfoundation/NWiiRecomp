@@ -71,3 +71,7 @@ target_include_directories(translator_semantics_test PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/nWiiRuntime/include")
 target_link_libraries(translator_semantics_test PRIVATE nwiiruntime)
 add_test(NAME translator_semantics COMMAND translator_semantics_test)
+
+add_executable(context_reschedule_test context_reschedule.cpp)
+target_link_libraries(context_reschedule_test PRIVATE nwiiruntime)
+add_test(NAME context_reschedule COMMAND context_reschedule_test)

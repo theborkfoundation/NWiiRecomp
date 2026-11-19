@@ -810,18 +810,9 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
     ctx.mmu.write64(c + 0x90 + i * 8, d);
   }
   ctx.mmu.write32(c + 0x194, ctx.fpscr);
-  // 0xFFFFFFFC is the context-switch sentinel. The address to resume is in
-  // srr0; saving the sentinel makes hle_load_context_from_guest restore
-  // 0xFFFFFFFC forever (post-intro black screen at frame ~3712).
-#if defined(__APPLE__)
-  static const bool s_srr0_restore = std::getenv("NWII_SRR0") != nullptr;
-#else
-  static const bool s_srr0_restore = true;
-#endif
-  uint32_t saved_pc =
-      (s_srr0_restore && ctx.pc == 0xFFFFFFFC && ctx.srr0 != 0) ? ctx.srr0
-                                                                : ctx.pc;
-  ctx.mmu.write32(c + 0x198, saved_pc);
+  // The dispatcher resolves the return sentinel before accepting an interrupt
+  // or reschedule; only real guest PCs may be saved as continuations.
+  ctx.mmu.write32(c + 0x198, ctx.pc);
   ctx.mmu.write32(c + 0x19C, ctx.msr); 
   for (int i = 0; i < 8; i++)
     ctx.mmu.write32(c + 0x1A4 + i * 4, ctx.gqr[i]);
@@ -956,30 +947,29 @@ bool process_pending_callbacks(CPUContext &ctx) {
     return 0x8009DD90; // Default for SOJE41 __OSReschedule
   }();
 
-  if (ctx.ext_resched_pending && g_resched_addr && !ctx.in_callback) {
-    if (ctx.pc == 0xFFFFFFFC || ctx.pc == 0x80006ccc || ctx.pc == 0) {
-      ctx.ext_resched_pending = false;
-      if (s_env_sample()) {
-        static int n = 0;
-        if (n++ < 12) {
-          uint32_t cur = ctx.mmu.read32(0x800000E4);
-          std::cout << "[Resched] cur=0x" << std::hex << cur
-                    << " prio=" << std::dec << ctx.mmu.read32(cur + 0x2D0)
-                    << " r1=0x" << std::hex << ctx.gpr[1] << std::dec << "\n";
-        }
-      }
-      ctx.gpr[3] = 0;
-      ctx.lr = 0xFFFFFFFC;
-      ctx.pc = g_resched_addr;
-      nwii::runtime::perf::reschedules.fetch_add(1,
-                                                 std::memory_order_relaxed);
-      dbg_disp("resched", g_resched_addr, 0, ctx);
-      return true;
-    }
+  // Restore a pending dispatch before asking the guest scheduler to run.
+  // At the sentinel the live registers still belong to the handler, not the
+  // selected thread, so they cannot be saved as that thread's context.
+  if (ctx.ext_resched_pending && g_resched_addr && !ctx.in_callback &&
+      ctx.pc == 0 && ctx.dispatch_saved_ctx == 0 &&
+      dispatch_context_is_stable(ctx)) {
+    return hle_load_context_from_guest(ctx);
+  }
+  if (ctx.ext_resched_pending && g_resched_addr && !ctx.in_callback &&
+      ctx.pc != 0 && ctx.pc != 0xFFFFFFFC && ctx.dispatch_saved_ctx == 0 &&
+      dispatch_context_is_stable(ctx)) {
+    uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
+    hle_save_context_to_guest(ctx, current_ctx);
+    ctx.dispatch_saved_ctx = current_ctx;
+    ctx.ext_resched_pending = false;
+    ctx.gpr[3] = 0;
+    ctx.lr = 0xFFFFFFFC;
+    ctx.pc = g_resched_addr;
+    nwii::runtime::perf::reschedules.fetch_add(1, std::memory_order_relaxed);
+    return true;
   }
 
   if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
-    ctx.ext_resched_pending = false;
     if (ctx.dispatch_saved_ctx) {
       if (std::getenv("NWII_DBG_CTX")) {
         static int n = 0;
@@ -1016,6 +1006,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
       }
       return true;
     }
+    // No current guest context is available yet. Keep the sentinel out of
+    // interrupt and callback saves until the dispatcher can resolve it.
+    return false;
   }
 
   // Fast path: if not at a thread context switch (0xFFFFFFFC) or idle (0 or 0x80006ccc),
@@ -1163,15 +1156,9 @@ bool process_pending_callbacks(CPUContext &ctx) {
   }
 
   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {
-    if (std::getenv("NWII_DBG_CTX")) {
-      static int n = 0;
-      if (n++ < 100)
-        std::cout << "[CbReturn] pc=0xfffffffc r1=0x" << std::hex << ctx.gpr[1]
-                  << " lr=0x" << ctx.lr << " depth=" << std::dec
-                  << ctx.callback_depth << " bk=" << ctx.backup_stack.size()
-                  << "\n";
-    }
-    ctx.in_callback = false;
+    // The generated dispatcher owns the callback backup and must unwind it
+    // before another event is allowed to save the CPU state.
+    return false;
   }
 
   if (ctx.in_callback) {
