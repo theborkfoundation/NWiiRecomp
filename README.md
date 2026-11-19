@@ -290,6 +290,149 @@ The periodic `[STAT]` probe is opt-in for that reason. Screenshots
 (`NWII_XFB`) and logo step dumps (`NWII_LOGO_STEPS`) are also diagnostic
 readbacks and should stay off in performance runs.
 
+### Performance overlay and CSV metrics
+
+`NWII_PERF` enables a bitmap-font overlay and a CSV logger that sample the
+runtime once per interval. It is separate from `NWII_STATS` (the periodic
+`[STAT]` probe).
+
+```bash
+# Compact overlay on the game window
+NWII_PERF=1 ./RaymanOrigins path/to/game config.toml
+
+# Full overlay: adds the current FRAMES count and TEX upload/hit/miss split
+NWII_PERF=full ./RaymanOrigins path/to/game config.toml
+
+# CSV only, no overlay: least perturbing for performance measurements
+NWII_PERF_LOG=/tmp/nwii-perf.csv ./RaymanOrigins path/to/game config.toml
+
+# Sample every 250 ms instead of the default 1000 ms
+NWII_PERF=1 NWII_PERF_INTERVAL_MS=250 NWII_PERF_LOG=/tmp/nwii-perf.csv \
+  ./RaymanOrigins path/to/game config.toml
+```
+
+- `NWII_PERF` — unset, empty, `0`, or `off`: no overlay. Any other value
+  (`1`, `full`, `2`, …) enables the overlay; `full` or `2` also shows the
+  extra full-mode line.
+- `NWII_PERF_LOG` — path to append CSV rows. The header is written only when
+  the file is new or empty. A file is not truncated on startup.
+- `NWII_PERF_INTERVAL_MS` — sampling window in milliseconds. Default `1000`;
+  values outside `100..60000` are ignored.
+- `NWII_PERF_LOG` without `NWII_PERF` samples and logs without drawing the
+  overlay. Use that mode for clean performance numbers: the overlay itself is
+  drawn after the game's present and before the swap, so it consumes CPU/GPU
+  time and can perturb the numbers it reports.
+- When neither variable is set, the overlay, sampler and CSV writer do no
+  work. The runtime's underlying relaxed atomic counters are still incremented
+  by normal execution.
+
+The compact overlay is:
+
+```text
+FPS ... FRAME ... P99 ...
+VI ... DRAWS ... MIPS ...
+PARSE ... RENDER ... WGP ...
+FIFO ... TEX <uploads>/<lookups> SH ...
+CB ... CTX ... RS ...
+AUD ... V ... PK ...
+ERR BAD ... UNK ... VFIX ... HDR ... DL ...
+```
+
+The full overlay adds:
+
+```text
+FRAMES ... TEX UP ... HIT ... MISS ...
+```
+
+#### Frame pacing and guest CPU
+
+| Overlay / CSV | Unit | Meaning |
+| :--- | :--- | :--- |
+| `FPS` / `fps` | frames/s | Host presentation rate: the number of `on_present()` calls in the sample window divided by its duration. This is the window's present rate, not `FRAMES` (the guest GX frame rate). With vsync it usually tracks the display refresh; with vsync off it tracks the host loop. |
+| `FRAME` / `frame_ms` | ms | Rolling average interval between host presents over the last 240 presents. It is a rolling value, not a per-sample reset, so it can differ from `1000 / FPS`. |
+| `P99` / `p99_ms` | ms | The 99th percentile of those 240 present intervals (nearest-rank). A high p99 relative to `FRAME` indicates occasional hitches/stutter even when average FPS looks healthy. |
+| `FRAMES` / `frames` | count in window | Guest GX frames drained by the command processor (`g_stat_frames`), one per detected GX frame boundary. Full overlay mode and CSV only. This is not necessarily one-to-one with host presents: the runtime can present the same guest frame more than once, or drain multiple guest frames between presents. |
+| `VI` / `vi` | count in window | VI interrupt triggers delivered to the guest (`g_vi_trigger_count`). The runtime deliberately coalesces retrace requests to roughly one per field (~59.94 Hz) unless `NWII_NO_VI_GATE` is set. This counts VI events, not GX draws or actual scanouts. A value above `FPS` means retrace events outnumbered presentations; it does not by itself prove that frames were skipped. |
+| `MIPS` / `mips` | million guest instructions/s | Guest PowerPC instructions retired per second: the delta of `CPUContext::inst_count` divided by the sample duration and 1e6. It measures emulated guest CPU work, not host CPU MIPS and not a host CPU percentage. |
+| `PARSE` / `parse_ms` | ms in window | CPU milliseconds spent parsing and decoding the GX command FIFO (`FifoParser::Parse` plus `DecodeDraw`). It is not per frame. At the default 1000 ms window this is effectively ms/s; divide by 10 for the approximate percentage of one CPU core (3 ms/s ≈ 0.3 % of a core). If the interval is changed, the value is still milliseconds in that window, not a normalized rate. |
+| `RENDER` / `render_ms` | ms in window | CPU milliseconds spent in the GL renderer's `Render(frame)` call, covering command submission, state/shader/texture work on the CPU. It does not include GPU execution or buffer swap time. Same window semantics as `PARSE`. GPU-bound scenes can show low `RENDER` while `FPS` or `P99` is poor. |
+
+#### GX command and renderer throughput
+
+| Overlay / CSV | Unit | Meaning |
+| :--- | :--- | :--- |
+| `DRAWS` / `draws` | count in window | Decoded GX draw primitives in the drained guest frames (`g_stat_draws`). Each surviving draw command increments it once; it is a count of guest draw calls, not GL draw calls, triangles, or vertices. |
+| `WGP` / `wgp_mb` | MiB/s | Bytes per second redirected from the GX write-gather pipe into guest memory (`wgp.redirected_bytes`). This happens when the PI FIFO destination differs from the GP command FIFO, typically while recording display lists or uploading vertex data. It is a normal mechanism, not GPU bus bandwidth, and not all WGP traffic. The runtime also prints `[WGPREDIR]` transitions when enabled. |
+| `FIFO` / `fifo_mb` | MiB/s | GX command-stream bytes pushed into the FIFO and fed to the parser per second (`fifo_bytes`), after write-gather redirection is filtered out. This is command-stream throughput, not FIFO queue depth, rendering bandwidth, or GPU memory bandwidth. |
+| `TEX` / `tex_up`, `tex_hit`, `tex_miss` | counts in window | Texture-cache activity. `tex_up` is the number of successful texture uploads to GL (decode plus `glTexImage2D`); `tex_hit` is a lookup served by an existing GL texture; `tex_miss` is a lookup that was not cached and triggered decode/upload. The compact overlay shows `tex_up/(tex_hit + tex_miss)` (uploads versus lookups). A high hit count and low upload count is healthy; streaming movies or animated textures can legitimately miss every frame. A miss is not an error. |
+| `SH` / `shaders` | entries (gauge) | Current number of entries in the generated GX shader cache (`nwii_stat_shaders()`), not shader compiles per second. It grows as new TEV/state permutations are encountered. A stable value means the shader cache is warm; it is not reset by the sample interval. |
+
+#### Guest scheduling and callbacks
+
+| Overlay / CSV | Unit | Meaning |
+| :--- | :--- | :--- |
+| `CB` / `cb` | count in window | HLE callbacks queued into the runtime's pending callback queue (`perf::callbacks` in `queue_callback`), including IRQ callbacks. This counts callbacks queued, not callbacks executed. Boot and IOS initialization can queue hundreds; a steady stream can be normal for games with async audio/disk work. |
+| `CTX` / `ctx` | count in window | Successful guest OSContext restores: how often `hle_load_context_from_guest()` loaded a context from guest memory. This is not a count of host thread context switches. It is high during boot loading and idle guest scheduling; a sustained, extreme value (for example, millions per second) points to a context-restore loop rather than useful work. |
+| `RS` / `rs` | count in window | Runtime-injected guest reschedules: the number of times the idle-thread path jumped to the guest `__OSReschedule` trampoline because runnable threads were detected. It is a scheduling diagnostic, not host thread migrations. |
+
+#### Audio
+
+| Overlay / CSV | Unit | Meaning |
+| :--- | :--- | :--- |
+| `AUD` / `audio` | sample frames in window | Per-channel sample frames pulled by the SDL audio callback from the ADMA ring. At 32 kHz and real-time playback this is roughly 32,000 frames per second; each frame carries left and right samples. A value near zero means no audio was produced/pulled (silence or underrun). This is not a video frame count. |
+| `V` / `voices` | voices (gauge) | Number of running AX voices at the most recent sample. This is a gauge, not a per-window count; 0 means no active voices, for example on a silent menu. |
+| `PK` / `peak` | PCM16 amplitude | Maximum absolute 16-bit audio sample seen by the pulls since the previous sample, reset to 0 after each sample. Range is 0..32768. Zero means silence; values near 32767 indicate possible clipping. This is a peak across both channels, not RMS and not a percentage. |
+
+#### GX integrity counters
+
+These are deltas of named diagnostics for the sample window. Each row is also
+included in the overlay's final `ERR` line, which turns red when any non-zero
+value is present.
+
+| Overlay / CSV | Diagnostic | Meaning |
+| :--- | :--- | :--- |
+| `BAD` / `bad` | `fifo.bad_continuation` | A GX command was accepted whose payload did not end on another command boundary, meaning the command size or stream framing was wrong. This is an error-class event: check it with any visible corruption. |
+| `UNK` / `unk` | `fifo.unknown_opcode` | A byte could not be decoded as a GX opcode; the parser skipped it to recover framing. This is a warning-class event. A single boot-time occurrence may be harmless; repeated occurrences mean commands are being missed. |
+| `VFIX` / `vfix` | `fifo.vsize_repaired` | A draw's vertex size was re-derived from the stream because the VAT disagreed with the observed data. This is a warning-class recovery; verify that the draw's vertices look correct. |
+| `HDR` / `hdr` | `fifo.headerless_vertices` | A vertex-data block had no draw header in front of it and was dropped. This is an error-class event because it means lost geometry. A one-off boot-time occurrence can be engine padding; repeated or per-frame occurrences correlate with missing/garbled draws. |
+| `DL` / `dl` | `dl.rejected` | A display list was refused: size greater than 4 MiB, outside MEM1/MEM2, or nesting depth ≥ 4. This is an error-class event and means silently lost geometry. Empty lists are counted separately as the info-only `dl.empty` and are not included here. |
+
+The overlay's `ERR` row is not a separate CSV column; it is the visual sum of
+`bad + unk + vfix + hdr + dl` for the window. Other diagnostics such as
+`frame.carry_without_end`, `dl.empty`, and `fifo.resync_bytes` are printed by
+the diagnostic logger but are not part of this overlay/CSV.
+
+#### CSV format and how to read the numbers
+
+CSV columns, in order:
+
+```text
+fps,frame_ms,p99_ms,vi,draws,mips,parse_ms,render_ms,wgp_mb,fifo_mb,
+tex_up,tex_hit,tex_miss,shaders,cb,ctx,rs,audio,voices,peak,
+bad,unk,vfix,hdr,dl,frames
+```
+
+- `fps` is normalized per second; `mips` is normalized per second;
+  `wgp_mb` and `fifo_mb` are MiB/s.
+- `fps`, `frame_ms`, and `p99_ms` describe host presents. `frames` describes
+  guest GX frames. Do not assume they are equal.
+- `parse_ms` and `render_ms` are **milliseconds accumulated inside the sample
+  window**, not per-frame averages and not automatically normalized. At the
+  default 1000 ms window they read as ms/s; at a 250 ms window, 2.0 means 2 ms
+  in that 250 ms window.
+- `vi`, `draws`, `tex_up`, `tex_hit`, `tex_miss`, `cb`, `ctx`, `rs`, `audio`,
+  and `frames` are **counts in the sample window**. At the default 1000 ms
+  window they are per-second counts; if you change `NWII_PERF_INTERVAL_MS`,
+  they remain counts for that window, not rates.
+- `shaders` and `voices` are instantaneous gauges. `peak` is the maximum since
+  the previous sample, reset afterward.
+- `frame_ms` and `p99_ms` use the rolling last-240-present window, while
+  `fps` uses the configured sampling window.
+- `NWII_PERF_LOG` appends one row per sample and has no timestamp column. The
+  first rows normally include boot/loading activity; use a steady-state slice
+  when comparing performance. Remove the file before a run if you want a
+  fresh header.
+
 ---
 
 - [PS2Recomp](https://github.com/ran-j/PS2Recomp) — Project structure and early inspiration from friend Ran-J; the foundation this recompiler is built on.
