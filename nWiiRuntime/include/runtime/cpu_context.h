@@ -653,16 +653,24 @@ struct CPUContext {
   // is several times 60.75M/s here: guest timers ran ~3x fast, so the 15s boot
   // movie played in under 5s. Wall clock is the default now; NWII_INSTTB=1
   // restores the old virtual clock for experiments.
+  //
+  // Called from every poll iteration, so it avoids division: the tick-to-tb
+  // ratio is cached as a 32.32 fixed-point multiplier and applied with a
+  // 128-bit multiply (umulh + shifts, no udiv). A literal `d / tps * tb_freq`
+  // costs two 64-bit udivs, each ~30 cycles on an A53. The truncation in the
+  // cached multiplier is under one part in 2^32 of a tick and does not
+  // accumulate into anything visible over a session.
   uint64_t read_timebase() const {
     static const bool inst =
         std::getenv("NWII_INSTTB") != nullptr;
     if (inst)
       return inst_count;
-    // Split into whole seconds and remainder before scaling so the product
-    // stays inside 64 bits for the life of a session.
-    const uint64_t tps = wall_ticks_per_sec();
+    static const uint64_t s_scale = [freq = tb_freq] {
+      const uint64_t tps = wall_ticks_per_sec();
+      return tps ? (uint64_t)(((unsigned __int128)freq << 32) / tps) : 0;
+    }();
     const uint64_t d = wall_ticks() - tb_start;
-    return d / tps * tb_freq + d % tps * tb_freq / tps;
+    return (uint64_t)(((unsigned __int128)d * s_scale) >> 32);
   }
 
   

@@ -37,9 +37,21 @@ extern "C" void run_game(nwii::runtime::CPUContext &ctx);
 namespace {
     static const bool s_env_sample_val = (std::getenv("NWII_SAMPLE") != nullptr);
     static const bool s_env_debug_val = (std::getenv("NWII_DEBUG") != nullptr);
+    // Read once: these gate logging inside the context save/restore helpers,
+    // which run on every interrupt and reschedule. Uncached getenv on a hot
+    // path is the PLAN.md Bottleneck 1 regression (environ_lock contention).
+    static const bool s_env_dbg_save_val =
+        (std::getenv("NWII_DBG_SAVE") != nullptr);
+    static const bool s_env_dbg_ctx_val =
+        (std::getenv("NWII_DBG_CTX") != nullptr);
+    static const bool s_env_dbg_loadctx_val =
+        (std::getenv("NWII_DBG_LOADCTX") != nullptr);
 }
 static inline bool s_env_sample() { return s_env_sample_val; }
 static inline bool s_env_debug() { return s_env_debug_val; }
+static inline bool s_env_dbg_save() { return s_env_dbg_save_val; }
+static inline bool s_env_dbg_ctx() { return s_env_dbg_ctx_val; }
+static inline bool s_env_dbg_loadctx() { return s_env_dbg_loadctx_val; }
 
 static uint32_t phys_to_virt(uint32_t addr) {
   if (addr == 0)
@@ -757,14 +769,14 @@ void hle_drive_thread_queue(CPUContext& ctx) {
 
 
 static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
-  if (std::getenv("NWII_DBG_SAVE")) {
+  if (s_env_dbg_save()) {
     std::cout << "[Save] c=0x" << std::hex << c << " pc=0x" << ctx.pc
               << " r1=0x" << ctx.gpr[1]
               << " d4=0x" << ctx.mmu.read32(0x800000D4)
               << " saved=0x" << ctx.dispatch_saved_ctx
               << " cur=0x" << ctx.mmu.read32(0x800000E4) << std::dec << "\n";
   }
-  if (std::getenv("NWII_DBG_CTX")) {
+  if (s_env_dbg_ctx()) {
     static int n = 0;
     if (n++ < 100)
       std::cout << "[SaveCtx] c=0x" << std::hex << c << " pc=0x" << ctx.pc
@@ -774,7 +786,7 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
                 << " dispatch_saved=0x" << std::hex << ctx.dispatch_saved_ctx
                 << std::dec << "\n";
   }
-  if (std::getenv("NWII_DBG_LOADCTX")) {
+  if (s_env_dbg_loadctx()) {
       if (ctx.pc < 0x80000000u || ctx.pc >= 0x806aa7e0u) {
           std::cout << "[DbgHleSave] BAD pc=0x" << std::hex << ctx.pc
                     << " lr=0x" << ctx.lr << " c=0x" << c << std::dec
@@ -826,7 +838,7 @@ static void hle_save_context_to_guest(CPUContext &ctx, uint32_t c) {
 
 
 static bool hle_load_context_from_guest(CPUContext &ctx) {
-  if (std::getenv("NWII_DBG_CTX")) {
+  if (s_env_dbg_ctx()) {
     static int n = 0;
     if (n++ < 100)
       std::cout << "[LoadCtx] in pc=0x" << std::hex << ctx.pc
@@ -867,7 +879,7 @@ static bool hle_load_context_from_guest(CPUContext &ctx) {
 
   
   ctx.mmu.write16(c + 0x1A2, ctx.mmu.read16(c + 0x1A2) & ~0x0002);
-  if (std::getenv("NWII_DBG_SAVE")) {
+  if (s_env_dbg_save()) {
     std::cout << "[Load] c=0x" << std::hex << c << " -> pc=0x" << ctx.pc
               << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1] << std::dec << "\n";
   }
@@ -905,7 +917,7 @@ static bool dispatch_context_is_stable(const CPUContext &ctx) {
 
 static void dbg_disp(const char *kind, uint32_t handler, uint32_t c,
                      const CPUContext &ctx) {
-  if (!std::getenv("NWII_DBG_SAVE"))
+  if (!s_env_dbg_save())
     return;
   std::cout << "[Disp] " << kind << " handler=0x" << std::hex << handler
             << " ctx=0x" << c << " pc=0x" << ctx.pc << " msr=0x" << ctx.msr
@@ -998,7 +1010,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
 
   if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
     if (ctx.dispatch_saved_ctx) {
-      if (std::getenv("NWII_DBG_CTX")) {
+      if (s_env_dbg_ctx()) {
         static int n = 0;
         if (n++ < 100)
           std::cout << "[RestoreDisp] saved=0x" << std::hex
@@ -1016,7 +1028,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
     if (hle_load_context_from_guest(ctx)) {
       static uint32_t restore_count = 0;
       restore_count++;
-      if (std::getenv("NWII_DBG_CTX")) {
+      if (s_env_dbg_ctx()) {
         static int n = 0;
         bool bad = (ctx.pc < 0x80004000u || ctx.pc >= 0x806aa7e0u ||
                     ctx.gpr[1] < 0x80000000u || ctx.lr < 0x80000000u);
@@ -1174,19 +1186,21 @@ bool process_pending_callbacks(CPUContext &ctx) {
   // heavy scenes the guest received VI at the render rate (~40 Hz) and every
   // frame-based timer (game clock, animation) ran slow. Drive it from the
   // wall clock here, in the CPU thread's poll path.
+  //
+  // This uses the same cheap wall clock as read_timebase() rather than
+  // steady_clock::now(): the poll body runs per branch, and a vDSO clock read
+  // here was the second-most expensive symbol in this function (I-033).
   {
-      static auto next_vi = std::chrono::steady_clock::now();
-      static const bool s_wallvi =
-          std::getenv("NWII_WALLVI") != nullptr || true;
-      if (s_wallvi) {
-          const auto now = std::chrono::steady_clock::now();
-          if (now >= next_vi) {
-              next_vi = now + std::chrono::microseconds(16683);
-              if ((nwii::runtime::hw::pi_intmr.load() & 0x00000100) &&
-                  !ctx.in_callback) {
-                  nwii::runtime::hw::vi_trigger_interrupt(true);
-                  hle_drive_thread_queue(ctx);
-              }
+      static const uint64_t s_vi_period =
+          CPUContext::wall_ticks_per_sec() * 16683 / 1000000; // 59.94 Hz
+      static uint64_t next_vi = CPUContext::wall_ticks();
+      const uint64_t now = CPUContext::wall_ticks();
+      if (now >= next_vi) {
+          next_vi = now + s_vi_period;
+          if ((nwii::runtime::hw::pi_intmr.load() & 0x00000100) &&
+              !ctx.in_callback) {
+              nwii::runtime::hw::vi_trigger_interrupt(true);
+              hle_drive_thread_queue(ctx);
           }
       }
   }
@@ -1417,7 +1431,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
               // current, so mirror that instead of second-guessing the value.
               uint32_t current_ctx = ctx.mmu.read32(0x800000D4);
               if (current_ctx == 0) {
-                  if (std::getenv("NWII_DBG_CTX")) {
+                  if (s_env_dbg_ctx()) {
                       static int n = 0;
                       if (n++ < 20)
                           std::cout << "[PI Defer] no valid ctx pc=0x" << std::hex << ctx.pc << std::dec << "\n";
@@ -1656,7 +1670,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
     // one saved and restored around the callback.
     ctx.mmu.write32(0x800000E4, dispatch_ctx);
   }
-  if (std::getenv("NWII_DBG_CTX")) {
+  if (s_env_dbg_ctx()) {
     static int n = 0;
     if (n++ < 100)
       std::cout << "[CbCall] current_ctx=0x" << std::hex << current_ctx
