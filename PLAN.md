@@ -163,20 +163,24 @@ down here rather than rediscovered.
 Wii strap/safety screen, even though `KPADReadEx` is called ~60x/s and the press
 is visible in `[KPAD] ReadEx ... trig=0x800`. The screen is a placeholder for the
 prologue movie: it advances only once that movie *completes or fails*.
-`NWII_SKIP_VIDEOS=1` makes the open fail and the state machine moves on;
 `NWII_SKIP_PROLOGUE=1` alone does not.
 
-Consequence: a run reaches the menu phase only with `NWII_SKIP_VIDEOS=1`, and the
-`menumainbackground_v2_WII.ipk` menu background is itself a video, so the same
-mechanism black-screens the menu later.
+> **Correction (2026-11-19): `NWII_SKIP_VIDEOS` is removed.** The flag was
+> documented here as the way to bypass the video gate, but it never worked. It
+> was a hand-edit in a single generated unit (`output_9.cpp`), so regenerating
+> the export dropped it, and nothing in the config registered the call. It has
+> been deleted from the runtime, the recompiler and the export. The notes below
+> record what was believed at the time and the measurements taken with the flag
+> set; do not use them as reproduction steps.
 
 `NWII_AUTOPRESS` (`<read>:<mask>[:<count>][,...]`) is still useful for driving UI
 once the video gate is out of the way.
 
 ### The menu phase streams vertex data with no draw header
 
-With `NWII_SKIP_VIDEOS=1` the engine's batched renderer (emitter `0x8052DAB4`,
-called from the submitter at `0x80542910`, itself called from `0x805438E4`)
+With `NWII_SKIP_VIDEOS=1` (since removed; see the correction above) the engine's
+batched renderer (emitter `0x8052DAB4`, called from the submitter at `0x80542910`,
+itself called from `0x805438E4`)
 streams whole runs of 24-byte vertices straight into the write-gather pipe. There
 is **no** `0x80|vat`/count header in front of them, confirmed on the producer side
 by `NWII_HDRLOG` (which logs every `stb 0x80..0xB7` + `sth` pair): the only
@@ -311,7 +315,7 @@ cannot have been mis-sized, and the engine pads every finished batch with NOPs -
 reporting "NOP followed by non-command" counted each of those twice and made the
 counter unreadable.
 
-### Measured, same 20 s menu-phase run (`NWII_SKIP_VIDEOS=1`)
+### Measured, same 20 s menu-phase run (with the since-removed `NWII_SKIP_VIDEOS`)
 
 | counter | before this round | after |
 |---|---|---|
@@ -373,7 +377,7 @@ of the listed addresses. The wrist-strap safety screen is two full-screen quads
 (640x480 RGB565) alternating between `106B3620` and `10749680`, so:
 
 ```sh
-NWII_SKIP_VIDEOS=1 NWII_SKIP_TEX=106B3620,10749680 NWII_SCREENSHOT=/tmp/s \
+NWII_SKIP_TEX=106B3620,10749680 NWII_SCREENSHOT=/tmp/s \
   NWII_SHOT_EVERY=60 ./RaymanOrigins <game>
 ```
 
@@ -389,7 +393,7 @@ run, and the game still has not reached the main menu.
 `NWII_SKIP_STRAP=1` is the shorthand for the same thing without hardcoded
 addresses: it drops draws whose stage-0 texture is 640x480 RGB565, which is what
 both wrist-strap pages are. Use it to watch what the game renders underneath
-(`NWII_SKIP_VIDEOS=1 NWII_SKIP_STRAP=1 ./RaymanOrigins <game>`).
+(`NWII_SKIP_STRAP=1 ./RaymanOrigins <game>`).
 
 ### Texture wrap modes were ignored
 

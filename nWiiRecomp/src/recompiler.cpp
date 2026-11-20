@@ -121,10 +121,6 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
   auto emit_headers = [](std::ostream &out) {
     out << "#include \"runtime/cpu_context.h\"\n";
     out << "#include \"runtime/config.h\"\n";
-    // Generated code calls runtime helpers declared here (for example the
-    // NWII_SKIP_VIDEOS `skip_movie_entry` hook in DVDFastOpen) that are not
-    // reachable through cpu_context.h/config.h.
-    out << "#include \"runtime/virtual_disc.h\"\n";
     out << "#include <stdint.h>\n";
     out << "#include <bit>\n";
     out << "#include <thread>\n";

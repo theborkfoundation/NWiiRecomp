@@ -2,7 +2,6 @@
 #include "runtime/virtual_disc.h"
 #include "runtime/movie_audio.h"
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -139,22 +138,8 @@ void VirtualDisc::parse_fst() {
             } else {
                 std::cout << "[VDisc] Missing file: " << host << std::endl;
             }
-            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".bik") == 0)
-                m_video_entries.push_back(i);
         }
     }
-}
-
-bool VirtualDisc::is_video_entry(uint32_t index) const {
-    return std::find(m_video_entries.begin(), m_video_entries.end(), index) !=
-           m_video_entries.end();
-}
-
-// NWII_SKIP_VIDEOS: report every .bik entry as a missing file so the engine's
-// DVDFastOpen path fails and skips the movie instead of playing it.
-bool skip_movie_entry(uint32_t entrynum) {
-    static const bool s_skip = std::getenv("NWII_SKIP_VIDEOS") != nullptr;
-    return s_skip && VirtualDisc::get().is_video_entry(entrynum);
 }
 
 size_t VirtualDisc::read(uint64_t offset, uint32_t len, uint8_t* dst) {
