@@ -1271,6 +1271,28 @@ int main(int argc, char **argv) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         int draw_w = 0, draw_h = 0;
         SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+        // On the EGL path (ANGLE over Metal) the surface is created at the
+        // backing scale while every SDL size query answers in points: a 640x480
+        // window rasterises into 1280x960, so glViewport(0,0,640,480) painted
+        // only the bottom-left quarter of the window. SDL's numbers cannot be
+        // trusted there, but the driver's default scissor box is the real
+        // surface extent, so take the larger of the two. A stale scissor would
+        // clip the present anyway, so reset it to the chosen size.
+        GLint sc[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_SCISSOR_BOX, sc);
+        if (sc[2] > draw_w && sc[3] > draw_h) {
+          static bool warned = false;
+          if (!warned) {
+            warned = true;
+            std::cout << "[Video] drawable is " << draw_w << "x" << draw_h
+                      << " but the GL surface is " << sc[2] << "x" << sc[3]
+                      << "; presenting at the GL size" << std::endl;
+          }
+          draw_w = sc[2];
+          draw_h = sc[3];
+        }
+        glDisable(GL_SCISSOR_TEST);
+        glScissor(0, 0, draw_w, draw_h);
         glViewport(0, 0, draw_w, draw_h);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
