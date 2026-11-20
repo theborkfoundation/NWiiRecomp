@@ -5,6 +5,9 @@
 #include <cstring>
 #include <algorithm>
 
+// Cached once: these sit on AI register writes, which run per audio frame.
+static const bool s_ai_dbg = std::getenv("NWII_AIDBG") != nullptr;
+
 namespace nwii::runtime {
     extern uint64_t get_os_time();
 }
@@ -46,14 +49,14 @@ void register_ai(MMIODispatcher& dispatcher) {
             ai_cr = (ai_cr & 0x08) | (val & ~0x08);
         } else if (reg == 0x04) {
             ai_vr = val;
-            if (std::getenv("NWII_AIDBG"))
+            if (s_ai_dbg)
                 std::cout << "[AI] VR=" << std::hex << val << std::dec << "\n";
         } else if (reg == 0x08) {
             ai_scnt = val;
             ai_start_time = nwii::runtime::get_os_time();
         } else if (reg == 0x0C) {
             ai_it = val;
-            if (std::getenv("NWII_AIDBG"))
+            if (s_ai_dbg)
                 std::cout << "[AI] IT=" << std::hex << val << std::dec << "\n";
         }
     };

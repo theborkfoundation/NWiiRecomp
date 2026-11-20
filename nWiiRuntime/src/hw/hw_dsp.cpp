@@ -8,6 +8,13 @@
 #include <mutex>
 #include <vector>
 
+// Cached once: these gate logging on the ARAM DMA and DSP mailbox paths, which
+// run per audio frame; an uncached getenv there is the PLAN.md Bottleneck 1
+// regression (environ_lock) and showed up as ~0.7% of samples on the A53.
+static const bool s_ar_trace = std::getenv("NWII_ARTRACE") != nullptr;
+static const bool s_snd_log = std::getenv("NWII_SNDLOG") != nullptr;
+static const bool s_dsp_ai_dbg = std::getenv("NWII_AIDBG") != nullptr;
+
 namespace nwii::runtime {
     extern MMU* g_mmu;
     extern CPUContext *g_ctx_ptr;
@@ -55,7 +62,7 @@ static void dsp_pump_events() {
 static void ar_dma_execute() {
     bool dir = (ar_cnt & 0x80000000) != 0;
     uint32_t count = ar_cnt & 0x7FFFFFFF;
-    if (std::getenv("NWII_ARTRACE")) {
+    if (s_ar_trace) {
       static int n = 0;
       if (n++ < 40)
         std::printf("[ARDMA] cnt=%u dir=%d mm=%08X ar=%08X\n", count, (int)dir,
@@ -138,7 +145,7 @@ static void adma_event_cb(CPUContext& ctx, uint64_t late) {
         return;
     uint32_t blocks = adma_control & 0x7FFF;
     uint32_t bytes = blocks * 32;
-    if (std::getenv("NWII_SNDLOG")) {
+    if (s_snd_log) {
         static int last_peak = -1, n = 0;
         int peak = 0;
         for (uint32_t o = 0; o + 3 < bytes; o += 2)
@@ -253,8 +260,8 @@ void register_dsp(MMIODispatcher& dispatcher) {{
         },
         [](uint32_t addr, uint32_t val) {
             dsp_pump_events();
-            static const bool artrace = ([](){ static const bool s = (std::getenv("NWII_ARTRACE") != nullptr); return s; })();
-            if (artrace && (addr & 0xFFF0) >= 0x5010 && (addr & 0xFFF0) < 0x5030)
+            // file-scope cached flag; avoids a per-write init guard
+            if (s_ar_trace && (addr & 0xFFF0) >= 0x5010 && (addr & 0xFFF0) < 0x5030)
                 std::cout << "[ARw] 0x" << std::hex << (addr & 0xFFFF)
                           << " = 0x" << val << std::dec << "\n";
             if (addr == 0xCC005000 || addr == 0xCC005002) {
@@ -328,7 +335,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             } else if (addr == 0xCC005036) {
                 bool was_on = (adma_control & 0x8000) != 0;
                 adma_control = val & 0xFFFF;
-                if (std::getenv("NWII_AIDBG"))
+                if (s_dsp_ai_dbg)
                     std::cout << "[ADMA] control=" << std::hex << adma_control
                               << " blocks=" << (adma_control & 0x7FFF)
                               << " addr=" << adma_addr << std::dec << "\n";
@@ -346,11 +353,14 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                     const uint64_t blocks = adma_control & 0x7FFF;
                     const uint64_t frames = blocks * 8;
                     uint64_t period = g_ctx_ptr->tb_freq * frames / 32000;
-                    if (const char *e = std::getenv("NWII_AI_HZ")) {
-                        const uint64_t hz = std::strtoul(e, nullptr, 10);
-                        if (hz)
-                            period = g_ctx_ptr->tb_freq / hz;
-                    }
+                    // Cached: this is on the ADMA control write path, which
+                    // runs per audio buffer. The value is fixed for the session.
+                    static const uint64_t s_ai_hz = [] {
+                        const char *e = std::getenv("NWII_AI_HZ");
+                        return e ? std::strtoul(e, nullptr, 10) : 0ull;
+                    }();
+                    if (s_ai_hz)
+                        period = g_ctx_ptr->tb_freq / s_ai_hz;
                     if (period == 0)
                         period = 1;
                     s_adma_event_id = EventScheduler::get().schedule_recurring(
@@ -386,8 +396,8 @@ void register_dsp(MMIODispatcher& dispatcher) {{
             return (uint16_t)MMIODispatcher::get().read32(addr);
         },
         [](uint32_t addr, uint16_t val) {
-            static const bool artrace = ([](){ static const bool s = (std::getenv("NWII_ARTRACE") != nullptr); return s; })();
-            if (artrace && (addr & 0xFFFF) >= 0x5020 && (addr & 0xFFFF) < 0x5030)
+            // file-scope cached flag; avoids a per-write init guard
+            if (s_ar_trace && (addr & 0xFFFF) >= 0x5020 && (addr & 0xFFFF) < 0x5030)
                 std::cout << "[ARw16] 0x" << std::hex << (addr & 0xFFFF)
                           << " = 0x" << val << std::dec << "\n";
             if      (addr == 0xCC005020) ar_mmaddr = (ar_mmaddr & 0x0000FFFF) | ((uint32_t)val << 16);

@@ -15,6 +15,11 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+
+// Cached once: the AX output/mix path runs per audio frame, and getenv takes a
+// global lock. This is the PLAN.md Bottleneck 1 regression; it showed as ~0.9%
+// of samples on the A53 with the guest polling audio state.
+static const bool s_snd_log = std::getenv("NWII_SNDLOG") != nullptr;
 #include <cstring>
 #include <chrono>
 #include <unordered_map>
@@ -242,7 +247,7 @@ void AXHle::run_cmds() {
       break;
     }
   }
-  if (std::getenv("NWII_SNDLOG") && process_cmds != 1) {
+  if (s_snd_log && process_cmds != 1) {
     static int n = 0;
     if (n++ < 10)
       std::printf("[AX] list had %d PROCESS commands\n", process_cmds);
@@ -333,11 +338,11 @@ void AXHle::process_pbs(uint32_t addr) {
           const bool stopped = pb.running != 1 && last_run[addr];
           if (started)
             g_adpcm.erase(addr);
-          if (stopped && std::getenv("NWII_SNDLOG"))
+          if (stopped && s_snd_log)
             std::printf("[STOP t=%ldms] pb=%08X fmt=%u\n", ax_ms(), addr,
                         pb.audio_addr.sample_format);
           last_run[addr] = (pb.running == 1);
-          if (started && std::getenv("NWII_SNDLOG")) {
+          if (started && s_snd_log) {
             static int n = 0;
             if (n++ < 40)
               std::printf("[SFX t=%ldms] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
@@ -361,11 +366,11 @@ void AXHle::process_pbs(uint32_t addr) {
         const bool stopped = pb.running != 1 && last_run[addr];
         if (started)
           g_adpcm.erase(addr);
-        if (stopped && std::getenv("NWII_SNDLOG"))
+        if (stopped && s_snd_log)
           std::printf("[STOP t=%ldms] pb=%08X fmt=%u\n", ax_ms(), addr,
                       pb.audio_addr.sample_format);
         last_run[addr] = (pb.running == 1);
-        if (started && std::getenv("NWII_SNDLOG")) {
+        if (started && s_snd_log) {
           static int n = 0;
           if (n++ < 40)
             std::printf("[SFX t=%ldms] start pb=%08X fmt=%u addr=%08X end=%08X vol=%u "
@@ -424,7 +429,7 @@ void AXHle::process_pbs(uint32_t addr) {
                 voices, running, with_updates, start_updates);
     ++dbg_list;
   }
-  if (std::getenv("NWII_SNDLOG")) {
+  if (s_snd_log) {
     static int last_run = -1, last_start = -1;
     static int shown = 0;
     if ((running != last_run || start_updates != last_start) && shown++ < 40) {
@@ -491,7 +496,7 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
   int32_t mdl = ramp ? (int16_t)pb.mixer.main_left.volume_delta : 0;
   int32_t mdr = ramp ? (int16_t)pb.mixer.main_right.volume_delta : 0;
 
-  if (std::getenv("NWII_SNDLOG")) {
+  if (s_snd_log) {
     static int shown = 0;
     if (shown++ < 10)
       std::printf("[SNDV] pb=%08X fmt=%u addr=%08X end=%08X loop=%u lp=%08X "
@@ -590,7 +595,7 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
         }
       }
 
-      if (std::getenv("NWII_SNDLOG")) {
+      if (s_snd_log) {
         if (i)
           metric_diff += std::abs((int)cur - metric_prev);
         metric_prev = cur;
@@ -615,7 +620,7 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
     st.ps = ps;
     addr = nib;
 
-    if (std::getenv("NWII_SNDLOG")) {
+    if (s_snd_log) {
       static std::unordered_map<uint32_t, int> shown;
       if (!shown.count(cur_pb_)) {
         shown[cur_pb_] = 1;
@@ -654,7 +659,7 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
         }
       }
     }
-    if (std::getenv("NWII_SNDLOG")) {
+    if (s_snd_log) {
       static std::unordered_map<uint32_t, int> shown;
       if (shown.size() < 8 && !shown.count(cur_pb_)) {
         shown[cur_pb_] = 1;
@@ -739,7 +744,7 @@ void AXHle::process_voice(ax::AXPBWii &pb, int offset, int count) {
 }
 
 void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
-  if (std::getenv("NWII_SNDLOG")) {
+  if (s_snd_log) {
     static uint32_t last = 0;
     static int n = 0;
     if (lr_addr != last && n++ < 20) {
@@ -778,7 +783,7 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
     const int32_t rawr = (int32_t)(((int64_t)main_r_[i] * v) >> 15) + t;
     const int16_t l = clamp16(rawl);
     const int16_t r = clamp16(rawr);
-    if (std::getenv("NWII_SNDLOG")) {
+    if (s_snd_log) {
       static int n = 0, peak = 0, clip = 0;
       peak = std::max(peak, std::abs((int)l));
       peak = std::max(peak, std::abs((int)r));
@@ -796,7 +801,7 @@ void AXHle::output(uint32_t lr_addr, uint32_t surround_addr, uint16_t volume) {
       wr16(lr_addr + (uint32_t)i * 4 + 2, (uint16_t)l);
     }
   }
-  if (lr_addr && std::getenv("NWII_SNDLOG")) {
+  if (lr_addr && s_snd_log) {
     static int last_peak = -1, shown = 0;
     int peak = 0;
     for (int i = 0; i < 96; ++i) {

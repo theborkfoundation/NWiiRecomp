@@ -606,8 +606,11 @@ struct CPUContext {
 
   
   uint64_t tb_freq = 40500000;
-  // Wall-clock origin in wall_ticks() units; see read_timebase().
-  uint64_t tb_start = wall_ticks();
+  // Wall-clock origin in wall_ticks() units, and the tick-to-tb multiplier;
+  // both are set once by init_timebase().
+  uint64_t tb_start = 0;
+  uint64_t tb_scale = 0;
+  bool tb_use_inst = false;
 
   // Monotonic wall clock in cheap ticks. On aarch64 the architected counter is
   // a single `mrs cntvct_el0` (~8.6 ns measured on the A53) where
@@ -654,23 +657,30 @@ struct CPUContext {
   // movie played in under 5s. Wall clock is the default now; NWII_INSTTB=1
   // restores the old virtual clock for experiments.
   //
-  // Called from every poll iteration, so it avoids division: the tick-to-tb
-  // ratio is cached as a 32.32 fixed-point multiplier and applied with a
-  // 128-bit multiply (umulh + shifts, no udiv). A literal `d / tps * tb_freq`
-  // costs two 64-bit udivs, each ~30 cycles on an A53. The truncation in the
-  // cached multiplier is under one part in 2^32 of a tick and does not
-  // accumulate into anything visible over a session.
+  // Called from every poll iteration *and* from every generated mftb/mftbu, so
+  // it avoids division: the tick-to-tb ratio is cached as a 32.32 fixed-point
+  // multiplier applied with a 128-bit multiply (umulh + extr). A literal
+  // `d / tps * tb_freq` costs two 64-bit udivs, each ~30 cycles on an A53. The
+  // truncation in the multiplier is under one part in 2^32 of a tick.
+  //
+  // The environment flag and the multiplier are members rather than
+  // function-local statics: those carry a thread-safe-init guard on every call,
+  // which showed up as 10% of samples on the A53 in a scene where the guest
+  // polls mftb in a loop.
   uint64_t read_timebase() const {
-    static const bool inst =
-        std::getenv("NWII_INSTTB") != nullptr;
-    if (inst)
+    if (tb_use_inst)
       return inst_count;
-    static const uint64_t s_scale = [freq = tb_freq] {
-      const uint64_t tps = wall_ticks_per_sec();
-      return tps ? (uint64_t)(((unsigned __int128)freq << 32) / tps) : 0;
-    }();
     const uint64_t d = wall_ticks() - tb_start;
-    return (uint64_t)(((unsigned __int128)d * s_scale) >> 32);
+    return (uint64_t)(((unsigned __int128)d * tb_scale) >> 32);
+  }
+
+  // Establish the wall-clock origin and the tick-to-tb multiplier. Call once
+  // after tb_freq is set (main.cpp does this before starting the CPU thread).
+  void init_timebase() {
+    tb_use_inst = std::getenv("NWII_INSTTB") != nullptr;
+    tb_start = wall_ticks();
+    const uint64_t tps = wall_ticks_per_sec();
+    tb_scale = tps ? (uint64_t)(((unsigned __int128)tb_freq << 32) / tps) : 0;
   }
 
   

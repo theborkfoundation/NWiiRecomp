@@ -984,7 +984,13 @@ bool process_pending_callbacks(CPUContext &ctx) {
     // RunQueueBits offset below are the RVL_SDK layout already assumed by the
     // reschedule probe earlier in this function.
     bool no_switch = false;
-    if (nwii::runtime::Config::get().game_id == "SOJE41" &&
+    // Cached: this runs on every reschedule and the id is fixed for the
+    // session. Doing the std::string comparison inline cost 9.4% of all
+    // samples on the A53.
+    static const bool s_is_soje41 = [] {
+      return nwii::runtime::Config::get().game_id == "SOJE41";
+    }();
+    if (s_is_soje41 &&
         g_resched_addr == 0x8009DD90 &&
         current_ctx == ctx.mmu.read32(0x800000E4) &&
         ctx.gpr[13] >= 0x80006170u && ctx.gpr[13] < 0x81800000u &&

@@ -741,7 +741,7 @@ int main(int argc, char **argv) {
     ctx->tb_freq = 60750000;                 
   }
 
-  ctx->tb_start = nwii::runtime::CPUContext::wall_ticks();
+  ctx->init_timebase();
 
   nwii::runtime::init_ipc_client(*ctx);
 
