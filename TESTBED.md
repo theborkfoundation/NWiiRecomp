@@ -51,6 +51,37 @@ Details worth knowing:
 - There is no screenshot protocol in this Weston build, so verification is
   visual on the qemu window or via `NWII_PERF_LOG` counters.
 
+### Profiling on the VM
+
+`perf` is installed (`linux-tools-5.15.0-203-generic`, matching the guest
+kernel), but the **hardware PMU is not exposed under HVF**: `perf stat -e
+cycles` reports `<not supported>`. Software events work, so sample
+`cpu-clock` — it is a time-based profile, which is what attribution needs.
+
+`perf_event_paranoid` is `4`, so unprivileged `record` produces an empty file.
+Use `sudo`, and pass the Wayland environment explicitly, because sudo resets
+`XDG_RUNTIME_DIR` to `/run/user/0` and then the game cannot reach the
+compositor:
+
+```sh
+ssh vm 'cd ~/nwii-test && sudo env XDG_RUNTIME_DIR=/run/user/1000 \
+  WAYLAND_DISPLAY=wayland-0 SDL_VIDEODRIVER=wayland \
+  NWII_AUTOADVANCE=1 NWII_MAX_SECONDS=25 \
+  perf record -e cpu-clock -o /tmp/p.data -- ./RaymanOrigins ./game ./config_gpu.toml'
+ssh vm 'sudo perf report -i /tmp/p.data --stdio -g none --sort symbol'
+```
+
+Under the current setup (VNC-less kiosk, `NWII_AUTOADVANCE=1`) this yields
+~50K samples in 25 s. `perf annotate --symbol=<name>` gives per-instruction
+cost, which is how the `mrs cntvct_el0` reads were found.
+
+Read the numbers with care: HVF weights hypervisor-exposed instructions far
+more heavily than bare metal does. `mrs cntvct_el0` showed 42% of
+`process_pending_callbacks` self time here, but `NWII_STEADYTB=1` (which
+replaces it with a vDSO `steady_clock` read) measured **slower** — 73.6 vs
+96.8 MIPS — so the counter is genuinely cheap and that attribution is an
+artifact. Always confirm a microbenchmark-shaped conclusion with an A/B.
+
 ## Orange Pi Zero 3 (offline)
 
 The reference low-end ARM64 target for the Linux port. Everything here was
