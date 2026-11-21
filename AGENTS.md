@@ -42,6 +42,26 @@ the board, `SDL_VIDEODRIVER=offscreen ./run.sh` profiles the real Mali-G31
 (60 fps) instead of llvmpipe (~34 fps); that path has no visible output and is
 measurement-only.
 
+The VM has **no `perf`** and `kernel.perf_event_paranoid=4`, so there are no
+symbol-level profiles there. The `NWII_PERF` / `NWII_PERF_LOG` CSV counters are
+all the attribution available until the board is back.
+
+### Staging builds on the VM
+
+**`~/nwii-test/RaymanOrigins` and `run.sh` are the only permanent artifacts.**
+Stage every other build to `~/nwii-test/scratch/` and delete it when the
+comparison is done — including `/tmp` copies, which live on the same overlay
+filesystem, not in RAM.
+
+The VM disk is a fixed-size qcow2 and it has already been filled once: a dozen
+kept debug binaries reached 2.0 GB of a 15 GB disk, leaving 130 MB free, at
+which point even `scp` of a 170 MB test build failed. A release binary is
+~170 MB, so a five-way A/B set costs ~1 GB before anything else. Reclaim with
+`df -h /` before staging, and never leave a candidate binary behind.
+
+Keep at most one fallback binary (`RaymanOrigins.prev`). Everything else is an
+intermediate and belongs in `scratch/`.
+
 ## Working conventions
 
 - Generated sources live under `games/*/export/` and are gitignored. Delete
@@ -53,4 +73,13 @@ measurement-only.
   notes and data; `PLAN.md`, `README.md` and `TESTBED.md` are tracked.
 - When a runtime path looks hot, prefer measuring on the board over guessing:
   the A53's in-order cores change the picture completely compared with Apple
-  Silicon.
+  Silicon. While it is offline, say plainly that a change is unmeasured rather
+  than presenting M4 numbers as if they transferred.
+- **A/B must compare binaries built from the same tree.** Both mistakes below
+  produced confident, meaningless numbers: diffing against an older staged
+  binary that predated the fixes under test, and `cp`-ing a candidate over a
+  running executable, which fails with `Text file busy` and silently leaves the
+  previous binary in place so both runs measure the same thing. Run distinct
+  paths, and `md5sum` the two before trusting the result.
+- Copy an edited runtime file into `games/*/export/` before cross-building, or
+  the build silently uses the previous version. Verify with `diff -q`.
