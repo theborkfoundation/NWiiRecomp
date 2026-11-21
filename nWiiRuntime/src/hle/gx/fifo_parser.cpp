@@ -1503,15 +1503,20 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
     const size_t fifo_size = fifo.size();
 
     // Per-call command trace, only materialised when a bogus draw shows up, so
-    // the sequence that produced it can be read back verbatim.
-    static std::vector<std::string> s_trace;
+    // the sequence that produced it can be read back verbatim. The entries are
+    // kept as raw values: formatting them per command costs a snprintf plus a
+    // heap allocation on every command parsed, and the text is only ever read
+    // from a diagnostic path.
+    struct TraceLine { size_t off; uint8_t b[4]; };
+    static std::vector<TraceLine> s_trace;
     if (depth == 0 && offset == 0)
         s_trace.clear();
 
     // Persistent history of the last non-NOP commands, across ticks. The parser
     // erases consumed bytes and can stall at offset 0, so the per-call trace is
     // empty exactly when the context is most needed.
-    static std::string s_hist[24];
+    struct HistLine { size_t off; uint8_t b[6]; };
+    static HistLine s_hist[24];
     static int s_hist_n = 0;
     static void (*s_dummy)() = nullptr;
     (void)s_dummy;
@@ -1564,22 +1569,22 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
         trace_prev_depth = depth;
 
         if (s_trace.size() < 4000) {
-            char line[96];
-            std::snprintf(line, sizeof(line), "off=%zu cmd=%02X %02X %02X %02X",
-                          offset, cmd, fifo[offset + 1],
-                          offset + 2 < fifo_size ? fifo[offset + 2] : 0,
-                          offset + 3 < fifo_size ? fifo[offset + 3] : 0);
-            s_trace.push_back(line);
+            TraceLine entry = {offset,
+                               {cmd,
+                                fifo[offset + 1],
+                                uint8_t(offset + 2 < fifo_size ? fifo[offset + 2] : 0),
+                                uint8_t(offset + 3 < fifo_size ? fifo[offset + 3] : 0)}};
+            s_trace.push_back(entry);
         }
         if (cmd != 0x00) {
-            char hl[96];
-            std::snprintf(hl, sizeof(hl), "%zu:%02X %02X %02X %02X %02X %02X",
-                          offset, cmd, fifo[offset + 1],
-                          offset + 2 < fifo_size ? fifo[offset + 2] : 0,
-                          offset + 3 < fifo_size ? fifo[offset + 3] : 0,
-                          offset + 4 < fifo_size ? fifo[offset + 4] : 0,
-                          offset + 5 < fifo_size ? fifo[offset + 5] : 0);
-            s_hist[s_hist_n % 24] = hl;
+            HistLine entry = {offset,
+                              {cmd,
+                               fifo[offset + 1],
+                               uint8_t(offset + 2 < fifo_size ? fifo[offset + 2] : 0),
+                               uint8_t(offset + 3 < fifo_size ? fifo[offset + 3] : 0),
+                               uint8_t(offset + 4 < fifo_size ? fifo[offset + 4] : 0),
+                               uint8_t(offset + 5 < fifo_size ? fifo[offset + 5] : 0)}};
+            s_hist[s_hist_n % 24] = entry;
             ++s_hist_n;
         }
 
@@ -1828,8 +1833,11 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
                        VertexSize(g_state.vat[vat_idx]));
                 if (bad_n <= 3) {
                     size_t from = s_trace.size() > 90 ? s_trace.size() - 90 : 0;
-                    for (size_t i = from; i < s_trace.size(); ++i)
-                        printf("   %s\n", s_trace[i].c_str());
+                    for (size_t i = from; i < s_trace.size(); ++i) {
+                        const TraceLine& e = s_trace[i];
+                        printf("   off=%zu cmd=%02X %02X %02X %02X\n", e.off,
+                               e.b[0], e.b[1], e.b[2], e.b[3]);
+                    }
                     printf("   --- hexdump ---\n");
                     size_t hs = offset > 160 ? offset - 160 : 0;
                     for (size_t i = hs; i < fifo_size && i < offset + 48; i += 16) {
@@ -2184,9 +2192,11 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
                             // draw header lives inside a list we expand.
                             printf("   history:");
                             int n = s_hist_n < 24 ? s_hist_n : 24;
-                            for (int k = 0; k < n; ++k)
-                                printf(" [%s]",
-                                       s_hist[(s_hist_n - n + k) % 24].c_str());
+                            for (int k = 0; k < n; ++k) {
+                                const HistLine& e = s_hist[(s_hist_n - n + k) % 24];
+                                printf(" [%zu:%02X %02X %02X %02X %02X %02X]", e.off,
+                                       e.b[0], e.b[1], e.b[2], e.b[3], e.b[4], e.b[5]);
+                            }
                             printf("\n");
                         }
                     }
