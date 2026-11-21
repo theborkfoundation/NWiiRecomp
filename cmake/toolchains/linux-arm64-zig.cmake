@@ -2,7 +2,7 @@
 #
 # Prepare the target libraries and compiler wrappers:
 #
-#   tools/debian-sysroot.py                 # build/sysroot-arm64
+#   tools/ubuntu-sysroot.py                 # build/sysroot-arm64
 #   tools/zig-toolchain.sh arm64            # build/zig-aarch64-*
 #
 # Configure a generated export or this project with:
@@ -34,7 +34,7 @@ endif()
 if(NOT EXISTS "${NWII_SYSROOT}/usr/include/SDL2/SDL.h")
     message(FATAL_ERROR
         "Missing Linux ARM64 sysroot at ${NWII_SYSROOT}.\n"
-        "Run: tools/debian-sysroot.py")
+        "Run: tools/ubuntu-sysroot.py")
 endif()
 
 set(CMAKE_SYSTEM_NAME Linux)

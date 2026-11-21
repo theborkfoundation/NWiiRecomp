@@ -14,7 +14,7 @@ artifact. Android/iOS packaging is out of scope.
 ## Build modes
 
 1. **Cross build (primary).** macOS or x86_64 Linux using zig's bundled clang
-   and libc++, plus the Debian arm64 sysroot. SDL2 comes from the sysroot via
+   and libc++, plus the Ubuntu noble arm64 sysroot (ports.ubuntu.com). SDL2 comes from the sysroot via
    pkg-config, so SDL2 itself is not cross-built and no host `wayland-scanner`
    is needed.
 2. **Native build on the target.** Debian/Ubuntu arm64 with system SDL2,
@@ -25,8 +25,8 @@ artifact. Android/iOS packaging is out of scope.
 
 ## Implementation
 
-- `tools/debian-sysroot.py` populates `build/sysroot-arm64` from
-  `tools/sysroots/arm64.lock` (Debian trixie arm64, 177 packages). The lock pins
+- `tools/ubuntu-sysroot.py` populates `build/sysroot-arm64` from
+  `tools/sysroots/arm64.lock` (Ubuntu noble arm64). The lock pins
   exact versions; the tree and `.deb` cache are derived and ignored.
 - `tools/zig-toolchain.sh arm64` writes `build/zig-aarch64-{cc,cxx,ar,ranlib}`.
   Only the compilers receive `-target aarch64-linux-gnu`; zig's LLVM archiver is
@@ -72,7 +72,7 @@ Done:
 - The default (fetched SDL2) macOS build still passes `ctest` 10/10.
 - The cross-built binary runs on an Orange Pi Zero 3 (Ubuntu 24.04.5 arm64,
   glibc 2.39, SDL2 2.30) with the game data. `readelf` shows the highest
-  required symbol is `GLIBC_2.17`, so the trixie sysroot does not force a newer
+  required symbol is `GLIBC_2.17`, so the noble sysroot does not force a newer
   target userland.
 - Under Xvfb + Mesa llvmpipe the runtime gets OpenGL 4.5 / 3.3 core, renders
   the Wii strap screen at 640x480, and advances through the intro.

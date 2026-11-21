@@ -186,23 +186,23 @@ measurement.
 
 ### Linux ARM64 cross builds
 
-The Linux ARM64 target uses Debian `arm64` (a 64-bit aarch64 userland). Prepare
-the target libraries and zig compiler wrappers once:
+The Linux ARM64 target runs Ubuntu 24.04 `arm64` (noble, a 64-bit aarch64
+userland). Prepare the target libraries and zig compiler wrappers once:
 
 ```bash
-./tools/debian-sysroot.py            # build/sysroot-arm64 from the lock
+./tools/ubuntu-sysroot.py            # build/sysroot-arm64 from the lock
 ./tools/zig-toolchain.sh arm64       # build/zig-aarch64-{cc,cxx,ar,ranlib}
 ```
 
-The sysroot tool resolves the SDL2/X11/Wayland dependency closure from the
-Debian trixie archive, downloads the `.deb`s into `build/debs-arm64`, and
-unpacks them into `build/sysroot-arm64`:
+The sysroot tool resolves the SDL2/X11/Wayland/FFmpeg dependency closure from
+the Ubuntu noble ports archive, downloads the `.deb`s into `build/debs-arm64`,
+and unpacks them into `build/sysroot-arm64`:
 
 ```bash
-./tools/debian-sysroot.py                            # populate from the lock
-./tools/debian-sysroot.py --verify                   # check the tree against the lock
-./tools/debian-sysroot.py --update-lock --dry-run    # refresh the lock, no downloads
-./tools/debian-sysroot.py --print-pkgconfig          # pkg-config environment for the tree
+./tools/ubuntu-sysroot.py                            # populate from the lock
+./tools/ubuntu-sysroot.py --verify                   # check the tree against the lock
+./tools/ubuntu-sysroot.py --update-lock --dry-run    # refresh the lock, no downloads
+./tools/ubuntu-sysroot.py --print-pkgconfig          # pkg-config environment for the tree
 ```
 
 `tools/sysroots/arm64.lock` pins the exact package versions; regular runs resolve
@@ -237,9 +237,12 @@ Run on the target:
   VT).
 - Shared SDL2 requires `libsdl2-2.0-0` plus Mesa/EGL/GLES and the selected
   window/audio backend libraries on the target.
-- The sysroot lock is Debian trixie (glibc 2.41). Match the target's release
-  with `--suite` + `--update-lock`, or build natively, rather than running a
-  newer-glibc binary on an older userland.
+- The sysroot lock is Ubuntu noble (glibc 2.39). It must match the target
+  image's release, not just its libc: sonames move between releases (trixie
+  ships FFmpeg 7.1 as libavcodec.so.61, noble ships 6.1 as .so.60), so a sysroot
+  from a different release links a binary the board cannot load. Use
+  `--mirror`/`--suite` + `--update-lock` for a different target, or build
+  natively.
 - Cross builds default to `-g0`: zig emits DWARF even at `-O3`, which turns the
   ~160 MB release executable into an ~800 MB one. Pass
   `-DNWII_ARM64_DEBUG_INFO=ON` when you need target symbols.

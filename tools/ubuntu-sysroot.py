@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Populate a Debian arm64 sysroot for Linux ARM64 cross builds.
+"""Populate an Ubuntu arm64 sysroot for Linux ARM64 cross builds.
 
-The Linux ARM64 target uses Debian trixie/arm64, so the libraries the cross
-build links against are that suite's packages. This tool resolves a dependency
+The Linux ARM64 target runs Ubuntu 24.04 (noble), so the libraries the cross
+build links against are that suite's packages, fetched from the ports archive
+(aarch64 Ubuntu is not on the main mirrors). This tool resolves a dependency
 closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
@@ -13,9 +14,15 @@ sysroot only needs headers, static archives and shared objects.
     tools/debian-sysroot.py --update-lock              # move to current versions
 
 The resolved package list is recorded in tools/sysroots/arm64.lock. Later runs
-resolve against that lock, so a Debian point release cannot silently change what
-the build links; --update-lock is the deliberate way to move. Only Debian arm64
-is supported: the Linux ARM64 build targets a 64-bit aarch64 userland.
+resolve against that lock, so a point release cannot silently change what the
+build links; --update-lock is the deliberate way to move. Only arm64 is
+supported: the Linux ARM64 build targets a 64-bit aarch64 userland.
+
+The suite must match the target image, not merely be "a Debian-family
+archive": sonames differ between releases (Debian trixie ships FFmpeg 7.1 as
+libavcodec.so.61, noble ships 6.1 as libavcodec.so.60), so a sysroot from a
+different release produces a binary the board cannot load. Use --mirror and
+--suite to point at a different target's archive.
 
 The sysroot is idempotent: packages already unpacked at the same version are
 skipped, so re-running only picks up changes. The tree and the .deb cache are
@@ -38,7 +45,13 @@ import tarfile
 import urllib.error
 import urllib.request
 
-MIRROR = "https://deb.debian.org/debian"
+# Default archive: Ubuntu noble (24.04) on ports.ubuntu.com, which is what the
+# test board runs. The sysroot must agree with the target image on ABI, not just
+# on glibc: Debian trixie ships FFmpeg 7.1 (libavcodec.so.61) while noble ships
+# 6.1 (libavcodec.so.60), so a trixie sysroot linked against FFmpeg produces a
+# binary the board cannot load. Override with --mirror/--suite for another
+# target; aarch64 Ubuntu is published on the separate ports archive.
+MIRROR = "https://ports.ubuntu.com/ubuntu-ports"
 
 # Debian architecture name for the Linux ARM64 target (aarch64 userland).
 ARCH = "arm64"
@@ -55,6 +68,12 @@ DEFAULT_PACKAGES = [
     # emulator itself only uses the window/KMSDRM paths.
     "libx11-dev",
     "libwayland-dev",
+    # Native Bink decoding. The runtime's CMake treats FFmpeg as optional, so a
+    # build still configures without these - but a sysroot built from this list
+    # should be able to produce the full feature set, and their Depends pull in
+    # the libavcodec/libavutil runtime shared objects the export links against.
+    "libavcodec-dev",
+    "libavutil-dev",
 ]
 
 # Not build inputs; their payloads only bloat the sysroot.
@@ -87,9 +106,9 @@ def fetch(url, dest):
     return dest
 
 
-def load_index(suite, component, arch):
+def load_index(mirror, suite, component, arch):
     """Return {package: {field: value}} for one component of a suite."""
-    url = "%s/dists/%s/%s/binary-%s/Packages.xz" % (MIRROR, suite, component, arch)
+    url = "%s/dists/%s/%s/binary-%s/Packages.xz" % (mirror, suite, component, arch)
     log("index %s" % url)
     with urllib.request.urlopen(url, timeout=120) as response:
         raw = lzma.decompress(response.read()).decode("utf-8", "replace")
@@ -231,10 +250,11 @@ def lock_path(root, arch):
 
 
 def read_lock(path):
-    """Return the recorded entries, or None when there is no lock."""
+    """Return (mirror, entries), or (None, None) when there is no lock."""
     if not os.path.exists(path):
-        return None
+        return None, None
 
+    mirror = None
     entries = []
     with open(path) as handle:
         for line in handle:
@@ -243,17 +263,21 @@ def read_lock(path):
                 continue
             if fields[0] == "suite":
                 continue
+            if fields[0] == "mirror":
+                mirror = fields[1]
+                continue
             # package version filename
             if len(fields) == 3:
                 entries.append({"Package": fields[0], "Version": fields[1], "Filename": fields[2]})
-    return entries or None
+    return mirror, (entries or None)
 
 
-def write_lock(path, suite, arch, entries):
+def write_lock(path, mirror, suite, arch, entries):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as handle:
-        handle.write("# %s: resolved by tools/debian-sysroot.py --update-lock\n" % arch)
+        handle.write("# %s: resolved by tools/ubuntu-sysroot.py --update-lock\n" % arch)
         handle.write("# Regenerate deliberately; the build resolves against this list.\n")
+        handle.write("mirror %s\n" % mirror)
         handle.write("suite %s\n" % suite)
         for entry in sorted(entries, key=lambda item: item["Package"]):
             handle.write("%s %s %s\n" % (entry["Package"], entry["Version"], entry["Filename"]))
@@ -299,7 +323,10 @@ def populate(args, root, arch):
     cache = os.path.abspath(args.cache or os.path.join(root, "build", "debs-" + arch))
     seeds = [name.strip() for name in args.packages.split(",") if name.strip()]
     record = lock_path(root, arch)
-    locked = None if args.update_lock else read_lock(record)
+    locked_mirror, locked = (None, None) if args.update_lock else read_lock(record)
+    # A locked run uses the archive recorded with the lock, so the tree and the
+    # lock cannot disagree about where a filename came from.
+    mirror = locked_mirror or args.mirror
 
     if locked:
         wanted = locked
@@ -307,7 +334,7 @@ def populate(args, root, arch):
     else:
         index = {}
         for component in args.components.split(","):
-            index.update(load_index(args.suite, component.strip(), arch))
+            index.update(load_index(args.mirror, args.suite, component.strip(), arch))
 
         unknown = [name for name in seeds if name not in index]
         if unknown:
@@ -319,7 +346,7 @@ def populate(args, root, arch):
             for entry in sorted(wanted, key=lambda item: item["Package"]):
                 log("  %-32s %s" % (entry["Package"], entry["Version"]))
             if args.update_lock:
-                write_lock(record, args.suite, arch, wanted)
+                write_lock(record, args.mirror, args.suite, arch, wanted)
                 log("%s: wrote %s" % (arch, os.path.relpath(record, root)))
             return 0
 
@@ -346,7 +373,7 @@ def populate(args, root, arch):
 
         if os.path.exists(stamp):
             continue
-        fetch("%s/%s" % (MIRROR, entry["Filename"]), deb)
+        fetch("%s/%s" % (mirror, entry["Filename"]), deb)
         downloaded += 1
         unpack(deb, dest)
         unpacked += 1
@@ -358,7 +385,7 @@ def populate(args, root, arch):
         prune(dest)
 
     if args.update_lock or not locked:
-        write_lock(record, args.suite, arch, wanted)
+        write_lock(record, args.mirror, args.suite, arch, wanted)
         log("%s: wrote %s" % (arch, os.path.relpath(record, root)))
 
     log("%s: %s (%d unpacked this run, %d new download(s))"
@@ -368,8 +395,13 @@ def populate(args, root, arch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--suite", default="trixie", help="Debian suite (default: trixie)")
-    parser.add_argument("--components", default="main", help="comma-separated archive components")
+    parser.add_argument("--suite", default="noble",
+                        help="archive suite (default: noble, matching the board's Ubuntu 24.04)")
+    parser.add_argument("--mirror", default=MIRROR,
+                        help="archive base URL (default: %s)" % MIRROR)
+    parser.add_argument("--components", default="main,universe",
+                        help="comma-separated archive components (default: main,universe; "
+                             "SDL2 and FFmpeg live in universe on Ubuntu)")
     parser.add_argument(
         "--dest", default=None, help="sysroot directory (default: build/sysroot-<arch>)"
     )
