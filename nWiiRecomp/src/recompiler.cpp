@@ -82,6 +82,13 @@ static std::string configured_hook(const analyzer::Function &func,
   return {};
 }
 
+// Hook that may decline a call at run time; the guest body stays as fallback.
+static std::string configured_optional_hook(const analyzer::Function &func,
+                                            const RecompilerConfig &config) {
+  auto it = config.optional_hooks.find(func.start_address);
+  return it == config.optional_hooks.end() ? std::string() : it->second;
+}
+
 // Handler selected by the analyzer (instruction signature) or the automatic
 // name allowlist. These functions are structural HLE: excluded from the guest
 // range table and dispatched through the exact-address switch.
@@ -742,7 +749,32 @@ void Recompiler::emit_function(std::ostream &out,
                                const analyzer::Function &func,
                                const std::string &func_name,
                                std::set<std::string> *cross_refs) {
+  const std::string optional_hook = configured_optional_hook(func, config_);
+  if (!optional_hook.empty()) {
+    // Emit the declaration inside the hook's own namespace. A qualified
+    // `extern bool ns::f(...)` at file scope is only legal as a redeclaration,
+    // and a block-scope one would land in the global namespace instead.
+    const auto pos = optional_hook.rfind("::");
+    if (pos == std::string::npos) {
+      out << "extern bool " << optional_hook
+          << "(nwii::runtime::CPUContext&);\n";
+    } else {
+      out << "namespace " << optional_hook.substr(0, pos) << " {\n";
+      out << "bool " << optional_hook.substr(pos + 2)
+          << "(nwii::runtime::CPUContext&);\n";
+      out << "}\n";
+    }
+  }
   out << "void " << func_name << "(CPUContext& ctx) {\n";
+
+  if (!optional_hook.empty()) {
+    // Guard on the entry PC: generated functions also carry interior resume
+    // labels, and an interrupt can resume mid-function, which must not
+    // re-enter the hook.
+    out << "    if (ctx.pc == 0x" << std::hex << std::uppercase
+        << func.start_address << std::dec << " && " << optional_hook
+        << "(ctx)) { ctx.pc = ctx.lr; return; }\n";
+  }
 
   // Explicit [hle_hooks] configuration replaces the guest body. Non-auto-HLE
   // functions stay in the dispatcher range table (like before), so callers

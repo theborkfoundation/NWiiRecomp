@@ -6,9 +6,9 @@ split_output = true
 instructions_per_file = 20000
 sdk_sigdb = "/Users/bachnx/Projects/wii-lie/third_party/dolphin-sigdb/totaldb.dsy"
 
+[instruction_overrides]
 # SOJE41: the worker can complete before thread creation returns on native CPUs.
 # Publish pending before bctrl; preserve the worker's zero when publishing its handle.
-[instruction_overrides]
 "80566D38" = "ctx.mmu.write32(ctx.gpr[13] - 0x5B80, 1); ctx.ctr = ctx.gpr[12];"
 "80566D40" = "if (ctx.mmu.read32(ctx.gpr[13] - 0x5B80) != 0) ctx.mmu.write32(ctx.gpr[13] - 0x5B80, ctx.gpr[3]);"
 
@@ -19,3 +19,9 @@ sdk_sigdb = "/Users/bachnx/Projects/wii-lie/third_party/dolphin-sigdb/totaldb.ds
 # (called from the game's input wrapper). Feed it from the input manager.
 [hle_hooks]
 "800A5B60" = "hle_kpad_read_ex"
+
+# SOJE41's video-only Bink entry. The native decoder handles the frame when it
+# can and declines anything it does not recognise, so the PowerPC body stays as
+# the fallback and this survives a regeneration.
+[optional_hooks]
+"80017100" = "nwii::runtime::decode_rayman_bink_frame"

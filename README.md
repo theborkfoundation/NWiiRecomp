@@ -290,6 +290,18 @@ The periodic `[STAT]` probe is opt-in for that reason. Screenshots
 (`NWII_XFB`) and logo step dumps (`NWII_LOGO_STEPS`) are also diagnostic
 readbacks and should stay off in performance runs.
 
+### Rayman Origins movie playback
+
+The SOJE41 export can decode BIKi video packets with FFmpeg's native
+`libavcodec` decoder. The guest continues to read the disc, select frames,
+and present its YUV textures. CMake enables the hook when the target's
+`libavcodec` and `libavutil` headers and libraries are available at build
+time. A build with this feature needs matching shared libraries at run time.
+For a cross build, use development files matching the FFmpeg ABI on the
+board. The opening frame logs `[Bink] native decoder`. Set
+`NWII_NATIVE_BINK=0` to compare with the PowerPC decoder. Builds without
+FFmpeg development files use the PowerPC decoder automatically.
+
 ### Performance overlay and CSV metrics
 
 `NWII_PERF` enables a bitmap-font overlay and a CSV logger that sample the

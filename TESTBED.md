@@ -151,6 +151,31 @@ Release defaults: `-O3 -DNDEBUG -g0`. Pass `-DNWII_ARM64_DEBUG_INFO=ON` when
 target symbols are needed, then strip for deployment if size matters. A release
 binary is ~160-175 MB.
 
+### Enabling the native Bink decoder in a cross build
+
+The Pi has Ubuntu's `libavcodec.so.60` and `libavutil.so.58`. For a new
+cross sysroot, add the corresponding arm64 headers, linker symlinks and
+shared libraries before configuring the export. Run this from the Mac after
+`tools/debian-sysroot.py`. It extracts the board's packages in a temporary
+directory and leaves its installed packages alone.
+
+```sh
+ssh opiz3 'set -e
+  work=$(mktemp -d)
+  cd "$work"
+  apt-get download libavcodec-dev libavutil-dev libavcodec60 libavutil58 >&2
+  for pkg in *.deb; do dpkg-deb -x "$pkg" root; done
+  cd root
+  tar czf - usr/include/aarch64-linux-gnu/libavcodec usr/include/aarch64-linux-gnu/libavutil \
+    usr/lib/aarch64-linux-gnu/libavcodec.so* usr/lib/aarch64-linux-gnu/libavutil.so*
+  cd / && rm -rf "$work"' | tar xzf - -C build/sysroot-arm64
+```
+
+Build and deploy as above. To check playback, run
+`SDL_VIDEODRIVER=offscreen NWII_AUTOADVANCE=1 NWII_MAX_SECONDS=45 ./run.sh`.
+The first decoded frame logs `[Bink] native decoder: 640x456`. For an A/B
+comparison, add `NWII_NATIVE_BINK=0` to use the guest decoder.
+
 ## Profiling toolbox on the target
 
 `perf` is **not** preinstalled and the `perf` wrapper refuses to run because the

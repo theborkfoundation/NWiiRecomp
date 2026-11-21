@@ -63,6 +63,7 @@ add_library(nwiiruntime STATIC
     src/hle/texture_cache_gl.cpp
     src/hle/ax.cpp
     src/hle/ax_hle.cpp
+    src/hle/bink_video.cpp
     src/hle/movie_audio.cpp
     src/hle/ios.cpp
     src/hle/ios_kernel.cpp
@@ -87,6 +88,23 @@ add_library(nwiiruntime STATIC
     src/hle/devices/es_device.cpp
     src/hle/interpreter.cpp
 )
+
+# Optional native decoder for the Rayman Bink hook. Keep a guest-code
+# fallback in exports built without FFmpeg development files.
+# Zig cross builds do not populate CMAKE_LIBRARY_ARCHITECTURE.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_av_multiarch "${CMAKE_SYSTEM_PROCESSOR}-linux-gnu")
+endif()
+find_path(NWII_AVCODEC_INCLUDE libavcodec/avcodec.h PATH_SUFFIXES ${_av_multiarch})
+find_path(NWII_AVUTIL_INCLUDE libavutil/frame.h PATH_SUFFIXES ${_av_multiarch})
+find_library(NWII_AVCODEC avcodec PATH_SUFFIXES ${_av_multiarch})
+find_library(NWII_AVUTIL avutil PATH_SUFFIXES ${_av_multiarch})
+if(NWII_AVCODEC_INCLUDE AND NWII_AVUTIL_INCLUDE AND NWII_AVCODEC AND NWII_AVUTIL)
+    set_source_files_properties(src/hle/bink_video.cpp PROPERTIES
+        COMPILE_DEFINITIONS NWII_HAVE_BINK_DECODER
+        INCLUDE_DIRECTORIES "${NWII_AVCODEC_INCLUDE};${NWII_AVUTIL_INCLUDE}")
+    target_link_libraries(nwiiruntime PRIVATE "${NWII_AVCODEC}" "${NWII_AVUTIL}")
+endif()
 
 if(NWII_SDL_INCLUDE_DIRS)
     target_include_directories(nwiiruntime PUBLIC ${NWII_SDL_INCLUDE_DIRS})

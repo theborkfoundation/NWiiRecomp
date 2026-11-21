@@ -26,6 +26,13 @@ struct RecompilerConfig {
 
     std::map<uint32_t, std::string> hle_hooks;
 
+    // Optional hooks: called as `if (hook(ctx)) { ctx.pc = ctx.lr; return; }`
+    // before the guest body runs, so a native fast path can take over while the
+    // original code stays as the fallback. Unlike hle_hooks, this does not
+    // remove the function from the dispatch range table, so it is safe when the
+    // native handler can decline a call.
+    std::map<uint32_t, std::string> optional_hooks;
+
     // Explicit per-title C++ replacements; labels and instruction accounting
     // are retained so interrupted functions can still resume at patched sites.
     std::map<uint32_t, std::string> instruction_overrides;
