@@ -8,3 +8,21 @@
 - **Hardware Emulation:** Recreates the behavior of essential Nintendo GameCube and Wii subsystems, including the Video Interface (VI), Processor Interface (PI), DVD Interface (DI), and Graphics Processor (GX FIFO/CP).
 - **HLE Hooks:** Replaces low-level OS calls (such as memory allocators or `OSReport` logging) with native, optimized equivalents.
 - **Main Loop:** Manages execution threads, VBlank interrupts, window creation, and rendering (using Raylib) to display the game on your screen.
+
+## Optional native Bink decoder
+
+Rayman Origins' BIKi video packets can be decoded by FFmpeg's `libavcodec`
+instead of by translated PowerPC code. The guest still reads the disc, selects
+frames and presents its own YUV textures; only the decode is native.
+
+CMake enables it when the target's `libavcodec`/`libavutil` headers and
+libraries are found at configure time, via `find_library` — no option is
+needed, and a build without them silently uses the PowerPC decoder. The hook
+is declared through `[optional_hooks]` in the recompiler config, so its
+entry-PC guard declines anything it does not recognise and the guest body
+remains the fallback.
+
+At run time the opening frame logs `[Bink] native decoder`. Set
+`NWII_NATIVE_BINK=0` to A/B against the PowerPC decoder. A build with the
+feature needs the matching shared libraries on the target, which
+`tools/ubuntu-sysroot.py` provides for the aarch64 sysroot.
