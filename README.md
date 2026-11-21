@@ -6,9 +6,8 @@ with no instruction-level emulation.
 
 A fork of
 [BlackLineInteractive/NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp)
-targeting **Linux ARM64 (aarch64)** and **Rayman Origins** (SOJE41) — the one
-game currently configured and validated. Upstream carries the wider game matrix
-and the Wii U work.
+targeting **Linux ARM64 (aarch64)** and **Rayman Origins** (SOJE41), the one
+game configured and validated here; upstream carries the rest.
 
 | Component | Role |
 | :--- | :--- |
@@ -17,21 +16,28 @@ and the Wii U work.
 | `nWiiRuntime` | HLE hardware, GX parser, rasterizer, shaders |
 | `nWiiStudio` | ImGui inspection tool (not built by default) |
 
-Generated code is only usable with optimisation on; always build `Release`.
-
-```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-./tools/ubuntu-sysroot.py && ./tools/zig-toolchain.sh arm64   # aarch64 only
-```
+Always build `Release`: generated code is only usable with optimisation on.
+`./tools/ubuntu-sysroot.py && ./tools/zig-toolchain.sh arm64` prepares the
+aarch64 sysroot and zig wrappers.
 
 ## Usage
 
 ```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/nWiiRecomp/nwiirecomp recomp_config_rayman.toml    # writes export/
 cd export && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
 `export/` is self-contained and builds without this repository.
+
+## Controls
+
+Default is the horizontal Wiimote layout; `NWII_INPUT=classic` reports a
+Classic Controller, `NWII_REMOTE=vertical` flips orientation. The mouse drives
+the IR pointer and Xbox gamepads work in both modes.
+
+`Space`/`Enter`/`K`/left click accept or jump; `J`/`Z`/`Shift`/right click
+attack or back; `Esc`/`P` pause; `-`/`Tab` select; arrows or `WASD` move.
 
 See [TESTBED.md](TESTBED.md) for the test beds and profiling,
 [AGENTS.md](AGENTS.md) for conventions, and
