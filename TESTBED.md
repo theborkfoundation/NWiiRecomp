@@ -41,20 +41,22 @@ Details worth knowing:
   rasterization. That matches the board's interactive path, so rendering work
   is exercised, but the rasterizer is desktop LLVM, not the A53's.
 - `weston.ini` is `~/.config/weston/weston.ini`: `idle-time=0`, output
-  `Virtual-1` pinned to **1280x960**. The mode must be explicit: virtio-gpu
-  advertises **640x480 as the preferred mode**, and QEMU sizes its window to
-  the guest's active CRTC mode, so leaving it unset halves the window in both
-  directions (640x480 instead of 1280x960). 1280x960 is in the connector mode
-  list and is exactly 2x 640x480, so aspect and DPI are unchanged.
+  `Virtual-1` pinned to **640x480**, matching the virtio-gpu device
+  (`-device virtio-gpu-pci,xres=640,yres=480`). **640x480 is the intended
+  size** — pin it deliberately. The CRTC and the qemu window are independent:
+  qemu draws whatever mode the guest selects into a fixed 640x480 window, so
+  a 1280x960 CRTC is scaled to 50% in both directions inside that same
+  window, and everything looks half-size. virtio-gpu advertises 640x480 as
+  preferred, so the default picks the right mode, but pinning it makes that
+  explicit rather than incidental.
 - The unit needs **`-c /home/bachnx/.config/weston/weston.ini`**. Weston does
   not find the file on its own in this service: there is no `HOME` in the
   unit's environment, and even adding one was not enough - the log said
   `Starting with no config file.` until the path was passed explicitly. An
   unread weston.ini fails silently, so check for `Using config file` in the
-  log after any edit, and confirm the result in
-  `/sys/kernel/debug/dri/0/state` (`mode: "1280x960"`) rather than in
-  `/sys/class/graphics/fb0/virtual_size`, which reports the kernel's *boot
-  console* (640x480) and does not follow the scanout mode.
+  log after any edit, and confirm the mode in `/sys/kernel/debug/dri/0/state`
+  (`mode: "640x480"`) rather than `/sys/class/graphics/fb0/virtual_size`, which
+  reports the kernel's *boot console* and does not follow the scanout mode.
 - The unit must **not** have an `ExecStartPre=`; under `PAMName=login` each
   one opens its own login session, the duplicate sessions break logind's seat
   handover, and Weston exits 1 with `failed to get session seat`. Keep the
