@@ -40,8 +40,21 @@ Details worth knowing:
 - **virtio-gpu has no virgl**, so Mesa falls back to **llvmpipe** — software
   rasterization. That matches the board's interactive path, so rendering work
   is exercised, but the rasterizer is desktop LLVM, not the A53's.
-- `weston.ini` is `~/.config/weston/weston.ini`: `shell=kiosk-shell.so`,
-  `idle-time=0`, output `Virtual-1` at 640x480.
+- `weston.ini` is `~/.config/weston/weston.ini`: `idle-time=0`, output
+  `Virtual-1` pinned to **1280x960**. The mode must be explicit: virtio-gpu
+  advertises **640x480 as the preferred mode**, and QEMU sizes its window to
+  the guest's active CRTC mode, so leaving it unset halves the window in both
+  directions (640x480 instead of 1280x960). 1280x960 is in the connector mode
+  list and is exactly 2x 640x480, so aspect and DPI are unchanged.
+- The unit needs **`-c /home/bachnx/.config/weston/weston.ini`**. Weston does
+  not find the file on its own in this service: there is no `HOME` in the
+  unit's environment, and even adding one was not enough - the log said
+  `Starting with no config file.` until the path was passed explicitly. An
+  unread weston.ini fails silently, so check for `Using config file` in the
+  log after any edit, and confirm the result in
+  `/sys/kernel/debug/dri/0/state` (`mode: "1280x960"`) rather than in
+  `/sys/class/graphics/fb0/virtual_size`, which reports the kernel's *boot
+  console* (640x480) and does not follow the scanout mode.
 - The unit must **not** have an `ExecStartPre=`; under `PAMName=login` each
   one opens its own login session, the duplicate sessions break logind's seat
   handover, and Weston exits 1 with `failed to get session seat`. Keep the
