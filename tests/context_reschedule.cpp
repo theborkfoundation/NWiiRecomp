@@ -1,3 +1,4 @@
+#include "runtime/config.h"
 #include "runtime/cpu_context.h"
 
 #include <cstdlib>
@@ -15,6 +16,7 @@ static void require(bool value) {
 
 int main() {
   using namespace nwii::runtime;
+  Config::get().game_id = "SOJE41";
   CPUContext ctx;
   constexpr uint32_t thread = 0x80010000;
   constexpr uint32_t resume = 0x80012340;
@@ -55,6 +57,23 @@ int main() {
   require(process_pending_callbacks(ctx));
   require(ctx.pc == resume && ctx.lr == link && ctx.gpr[1] == stack);
   require(ctx.gpr[3] == 0x12345678 && ctx.dispatch_saved_ctx == 0);
+
+  // A running SOJE41 thread outranks priority 12. Complete the request
+  // without entering the scheduler, then honor a fresh higher-priority wakeup.
+  ctx.gpr[13] = 0x80040000;
+  ctx.mmu.write16(thread + 0x2c8, 2);
+  ctx.mmu.write32(thread + 0x2d0, 8);
+  ctx.mmu.write32(ctx.gpr[13] - 24944, 0x80000000u >> 12);
+  ctx.ext_resched_pending = true;
+  require(!process_pending_callbacks(ctx));
+  require(!ctx.ext_resched_pending && ctx.pc == resume && !ctx.dispatch_saved_ctx);
+  ctx.mmu.write32(ctx.gpr[13] - 24944, 0x80000000u >> 4);
+  ctx.ext_resched_pending = true;
+  require(process_pending_callbacks(ctx));
+  require(!ctx.ext_resched_pending && ctx.pc == 0x8009dd90);
+  ctx.pc = sentinel;
+  require(process_pending_callbacks(ctx));
+  require(ctx.pc == resume && !ctx.dispatch_saved_ctx);
 
   // The guest scheduler can call a hook with interrupts disabled while its
   // current context still names the thread it is switching to. Rescheduling

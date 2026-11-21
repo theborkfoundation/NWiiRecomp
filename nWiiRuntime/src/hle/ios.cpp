@@ -1002,10 +1002,12 @@ bool process_pending_callbacks(CPUContext &ctx) {
       // thread's priority is at or above the lowest set bit.
       no_switch = priority < 32 && priority <= std::countl_zero(ready);
     }
+    // A no-switch decision completes this interrupt's reschedule request too.
+    // Leaving it pending repeats the guest run-queue lookup on every poll.
+    ctx.ext_resched_pending = false;
     if (!no_switch) {
       hle_save_context_to_guest(ctx, current_ctx);
       ctx.dispatch_saved_ctx = current_ctx;
-      ctx.ext_resched_pending = false;
       ctx.gpr[3] = 0;
       ctx.lr = 0xFFFFFFFC;
       ctx.pc = g_resched_addr;

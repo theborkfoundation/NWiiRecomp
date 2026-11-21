@@ -1,4 +1,6 @@
 
+#include <algorithm>
+#include <bit>
 #include <map>
 #include "runtime/cpu_context.h"
 
@@ -365,7 +367,7 @@ void ProcessGXFifo() {
 
 namespace nwii::runtime {
 
-static inline void wgp_push(uint8_t b) {
+static void trace_wgp_byte(uint8_t b) {
 
     static const char* s_dump_path = std::getenv("NWII_GXDUMP");
     static const char* s_seg_path = std::getenv("NWII_WGSEG");
@@ -466,30 +468,29 @@ static inline void wgp_push(uint8_t b) {
         ++total;
     }
 
-    g_hw_fifo.push_back(b);
-    nwii::runtime::perf::fifo_bytes.fetch_add(1, std::memory_order_relaxed);
-    ++g_wgp_total_bytes;
-
-    // Raw draw-sync fallback. The parser can lose command boundaries on a
-    // damaged stream, which made GFXAdapter_WII::syncGPU() spin forever on
-    // GXSetDrawSync(0xCAFE). Watch the live FIFO bytes directly: a 0x47
-    // command is followed by a 24-bit token (the engine writes 0x4700CAFE).
-    // Signalling an extra token is harmless; a lost one deadlocks the game.
-    {
-        static uint8_t win[4] = {0, 0, 0, 0};
-        win[0] = win[1];
-        win[1] = win[2];
-        win[2] = win[3];
-        win[3] = b;
-        if (win[0] == 0x47)
-            nwii::runtime::hw::pe_signal_token(
-                (uint16_t)((win[2] << 8) | win[3]), true);
-    }
 }
 
+static uint32_t g_token_window = 0;
 
+// Called with g_fifo_mutex held. Keep the rolling token across write widths:
+// the token prefix and its payload can arrive in separate guest stores.
+template<size_t N>
+static void wgp_push(const uint8_t (&bytes)[N]) {
+    static const bool trace = std::getenv("NWII_GXDUMP") || std::getenv("NWII_WGSEG") ||
+        std::getenv("NWII_WGTRACE") || std::getenv("NWII_WGPCALL") || std::getenv("NWII_WGTHR");
+    if (trace)
+        for (uint8_t b : bytes) trace_wgp_byte(b);
 
-
+    if constexpr (N == 1) g_hw_fifo.push_back(bytes[0]);
+    else g_hw_fifo.insert(g_hw_fifo.end(), bytes, bytes + N);
+    perf::fifo_bytes.fetch_add(N, std::memory_order_relaxed);
+    g_wgp_total_bytes += N;
+    for (uint8_t b : bytes) {
+        g_token_window = (g_token_window << 8) | b;
+        if ((g_token_window >> 24) == 0x47)
+            hw::pe_signal_token(static_cast<uint16_t>(g_token_window), true);
+    }
+}
 
 // PI registers select the CPU write-gather destination. When it differs from
 // the GP command FIFO, GX is recording a display list or uploading vertex RAM.
@@ -503,7 +504,7 @@ static bool pip_fifo_redirect_enabled() {
     return on;
 }
 
-static bool wgp_redirect(uint8_t b) {
+static bool wgp_redirect(const uint8_t *bytes, unsigned size) {
     static uint8_t gather[32];
     static unsigned count = 0;
     static uint32_t expected_wp = 0;
@@ -519,11 +520,11 @@ static bool wgp_redirect(uint8_t b) {
     }
     if (redirect && !nwii::runtime::g_mmu) redirect = false;
 
+    static uint64_t s_bytes = 0;
     // Report transitions: FIFO bytes silently leaving the GX stream would drop
     // whole commands out of the middle of a frame.
     {
         static bool s_last = false;
-        static uint64_t s_bytes = 0;
         static int s_msgs = 0;
         if (redirect != s_last && s_msgs++ < 20) {
             printf("[WGPREDIR] %s at %llu bytes redirected (pi base=0x%08X end=0x%08X "
@@ -532,7 +533,6 @@ static bool wgp_redirect(uint8_t b) {
                    end, wptr, nwii::runtime::hw::cp_fifo_base_reg());
             s_last = redirect;
         }
-        if (redirect) ++s_bytes;
     }
 
     if (redirect != previous_redirect || (redirect && wptr != expected_wp)) {
@@ -543,61 +543,57 @@ static bool wgp_redirect(uint8_t b) {
     previous_redirect = redirect;
     if (!redirect) return false;
     expected_wp = wptr;
-    {
-        static const int kSlot =
-            NWII_DIAG_SLOT("wgp.redirected_bytes", diag::Kind::Warn);
-        diag::bump(kSlot);
-    }
-    gather[count++] = b;
+    const unsigned n = std::min(size, 32u - count);
+    static const int kSlot = NWII_DIAG_SLOT("wgp.redirected_bytes", diag::Kind::Warn);
+    diag::bump(kSlot, n);
+    s_bytes += n;
+    std::memcpy(gather + count, bytes, n);
+    count += n;
     if (count == 32) {
-        for (unsigned i = 0; i < 32; ++i)
-            nwii::runtime::g_mmu->write8((0x80000000u | (wptr & 0x3FFFFFFFu)) + i, gather[i]);
+        const uint32_t address = 0x80000000u | (wptr & 0x3fffffffu);
+        // Use MMU writes here so watchpoints and non-RAM destinations keep
+        // their byte semantics. Only the route lookup and gather are batched.
+        for (unsigned i = 0; i < 32; ++i) g_mmu->write8(address + i, gather[i]);
         if ((wptr & 0x3FFFFFFF) == (end & 0x3FFFFFE0)) wptr = base;
         else wptr += 32;
         nwii::runtime::hw::pi_fifo_set_wptr(wptr);
         expected_wp = wptr;
         count = 0;
     }
+    if (n < size) wgp_redirect(bytes + n, size - n);
     return true;
 }
 
-void GX_WGPIPE_Write8(uint8_t val) {
-    if (wgp_redirect(val)) return;
-    const uint64_t off_before = g_wgp_total_bytes;
+template<size_t N>
+static void write_gather(const uint8_t (&bytes)[N]) {
+    if (wgp_redirect(bytes, N)) return;
     std::lock_guard<std::mutex> lock(g_fifo_mutex);
-    wgp_push(val);
-    hdr_note8(val, off_before);
+    const uint64_t offset = g_wgp_total_bytes;
+    if constexpr (N == 4) {
+        static const bool sample = std::getenv("NWII_SAMPLE") != nullptr;
+        if (sample) {
+            static uint64_t n = 0;
+            ++n;
+            if (n == 1 || n == 10 || n == 100 || n == 1000 || n == 10000 || n % 100000 == 0)
+                std::cout << "[GX] WGP write32 #" << std::dec << n
+                          << " fifo_bytes=" << g_hw_fifo.size() << "\n";
+        }
+    }
+    wgp_push(bytes);
+    if constexpr (N == 1) hdr_note8(bytes[0], offset);
+    if constexpr (N == 2) hdr_note16((uint16_t(bytes[0]) << 8) | bytes[1], offset);
+}
+
+void GX_WGPIPE_Write8(uint8_t val) {
+    write_gather({val});
 }
 
 void GX_WGPIPE_Write16(uint16_t val) {
-    if (wgp_redirect(val >> 8)) { wgp_redirect(val & 0xFF); return; }
-    const uint64_t off_before = g_wgp_total_bytes;
-    std::lock_guard<std::mutex> lock(g_fifo_mutex);
-    wgp_push(val >> 8);
-    wgp_push(val & 0xFF);
-    hdr_note16(val, off_before);
+    write_gather({uint8_t(val >> 8), uint8_t(val)});
 }
 
 void GX_WGPIPE_Write32(uint32_t val) {
-    if (wgp_redirect(val >> 24)) {
-        wgp_redirect((val >> 16) & 0xFF);
-        wgp_redirect((val >> 8) & 0xFF);
-        wgp_redirect(val & 0xFF);
-        return;
-    }
-    if (std::getenv("NWII_SAMPLE")) {
-        static uint64_t n = 0;
-        ++n;
-        if (n == 1 || n == 10 || n == 100 || n == 1000 || n == 10000 ||
-            (n % 100000) == 0)
-            std::cout << "[GX] WGP write32 #" << std::dec << n
-                      << " fifo_bytes=" << g_hw_fifo.size() << "\n";
-    }
-    std::lock_guard<std::mutex> lock(g_fifo_mutex);
-    wgp_push(val >> 24);
-    wgp_push((val >> 16) & 0xFF);
-    wgp_push((val >> 8) & 0xFF);
-    wgp_push(val & 0xFF);
+    write_gather({uint8_t(val >> 24), uint8_t(val >> 16), uint8_t(val >> 8), uint8_t(val)});
 }
 
 void GX_WGPIPE_WriteF32(float val) {
@@ -606,15 +602,10 @@ void GX_WGPIPE_WriteF32(float val) {
 }
 
 void GX_WGPIPE_WriteF64(double val) {
-    union { double d; uint64_t i; } u; u.d = val;
-    if (wgp_redirect((u.i >> 56) & 0xFF)) {
-        for (int s = 48; s >= 0; s -= 8)
-            wgp_redirect((u.i >> s) & 0xFF);
-        return;
-    }
-    std::lock_guard<std::mutex> lock(g_fifo_mutex);
-    for (int s = 56; s >= 0; s -= 8)
-        wgp_push((u.i >> s) & 0xFF);
+    const uint64_t bits = std::bit_cast<uint64_t>(val);
+    uint8_t bytes[8];
+    for (unsigned i = 0; i < 8; ++i) bytes[i] = uint8_t(bits >> (56 - 8 * i));
+    write_gather(bytes);
 }
 
 } 

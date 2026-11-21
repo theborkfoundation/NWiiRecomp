@@ -471,6 +471,41 @@ static int g_xfring_n = 0;
 static void SetupDrawState(const GXCommand &cmd);
 static void EmitPrimitive(const GXCommand &cmd);
 
+static void BindDrawTextures() {
+  if (!g_ctx_ptr) return;
+  static const bool no_tex = std::getenv("NWII_NOTEX") != nullptr;
+  for (int i = 0; i < 8; ++i) {
+    // The linker removes samplers that this TEV program never reads.
+    if (s_active_shader.id && s_active_shader.uTex[i] < 0) continue;
+    // Select the unit before the cache lookup: get_texture() creates
+    // and binds textures on the current active unit.
+    glActiveTexture(GL_TEXTURE0 + i);
+    GLuint want = 0;
+    const auto &stage = g_state.texStages[i];
+    if (!no_tex && stage.base_addr != 0 && stage.width > 0 &&
+        stage.height > 0) {
+      want = nwii::runtime::hle::TextureCache::get().get_texture(
+          *g_ctx_ptr, stage);
+    }
+    glBindTexture(GL_TEXTURE_2D, want);
+    // Wrap comes from the GX tile descriptor, not from the texture. GL
+    // defaults to REPEAT, so a quad whose UVs leave [0,1] tiles the
+    // texture across the whole screen instead of clamping to the edge.
+    static GLint wrap_map[3] = {GL_CLAMP_TO_EDGE, GL_REPEAT,
+                                GL_MIRRORED_REPEAT};
+    static const bool s_force_repeat =
+        std::getenv("NWII_FORCE_REPEAT") != nullptr;
+    GLint ws = wrap_map[stage.wrap_s < 3 ? stage.wrap_s : 0];
+    GLint wt = wrap_map[stage.wrap_t < 3 ? stage.wrap_t : 0];
+    if (s_force_repeat) {
+      ws = GL_REPEAT;
+      wt = GL_REPEAT;
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
+  }
+}
+
 static void DrawPrimitive(const GXCommand &cmd) {
   const auto &v = cmd.vertices;
   // NWII_SOLO=<vertex count>: render only the draws with that many vertices so
@@ -631,6 +666,7 @@ static void DrawPrimitive(const GXCommand &cmd) {
     diag::bump(kSlot);
     return; // shader for this state not ready yet
   }
+  BindDrawTextures();
   EmitPrimitive(cmd);
 }
 
@@ -774,7 +810,7 @@ static void SetupDrawState(const GXCommand &cmd) {
   ApplyCullMode();
 
   for (int i = 0; i < 8; ++i) {
-    if (g_state.texStages[i].base_addr != 0 && s_active_shader.uTex[i] >= 0) {
+    if (s_active_shader.uTex[i] >= 0) {
       glUniform1i(s_active_shader.uTex[i], i);
     }
   }
@@ -1423,48 +1459,6 @@ public:
             continue;
         }
 
-        if (g_ctx_ptr) {
-          // Bind on every draw, not once per batch. The engine merges consecutive
-          // draws that share a primitive type into one batch, so binding at batch
-          // start made every later draw sample the first draw's texture -- which
-          // is how a white mask texture ended up covering the whole menu.
-          // NWII_NOTEX leaves every unit on texture 0 (samples black), which
-          // separates "white because of the texture" from other causes.
-          static const bool no_tex = std::getenv("NWII_NOTEX") != nullptr;
-          // No "already bound" cache: the present/blit path and the EFB lookup
-          // bind textures directly on unit 0, so a cached id goes stale and the
-          // draw samples whatever the last presenter bound. Eight binds per draw
-          // is cheaper than getting that wrong.
-          for (int i = 0; i < 8; ++i) {
-            // Select the unit before the cache lookup: get_texture() creates
-            // and binds textures on the current active unit.
-            glActiveTexture(GL_TEXTURE0 + i);
-            GLuint want = 0;
-            const auto &stage = g_state.texStages[i];
-            if (!no_tex && stage.base_addr != 0 && stage.width > 0 &&
-                stage.height > 0) {
-              want = nwii::runtime::hle::TextureCache::get().get_texture(
-                  *g_ctx_ptr, stage);
-            }
-            glActiveTexture(GL_TEXTURE0 + i);
-            glBindTexture(GL_TEXTURE_2D, want);
-            // Wrap comes from the GX tile descriptor, not from the texture. GL
-            // defaults to REPEAT, so a quad whose UVs leave [0,1] tiles the
-            // texture across the whole screen instead of clamping to the edge.
-            static GLint wrap_map[3] = {GL_CLAMP_TO_EDGE, GL_REPEAT,
-                                        GL_MIRRORED_REPEAT};
-            static const bool s_force_repeat =
-                std::getenv("NWII_FORCE_REPEAT") != nullptr;
-            GLint ws = wrap_map[stage.wrap_s < 3 ? stage.wrap_s : 0];
-            GLint wt = wrap_map[stage.wrap_t < 3 ? stage.wrap_t : 0];
-            if (s_force_repeat) {
-              ws = GL_REPEAT;
-              wt = GL_REPEAT;
-            }
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
-          }
-        }
         DrawPrimitive(cmd);
         if (s_framelist && !s_fl_dumped && !cmd.vertices.empty()) {
           float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;

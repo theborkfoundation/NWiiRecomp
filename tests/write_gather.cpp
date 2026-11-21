@@ -68,7 +68,7 @@ int main() {
         }
     }
     auto& mmio = MMIODispatcher::get();
-    register_pi(mmio); register_cp(mmio);
+    register_pi(mmio); register_cp(mmio); register_pe(mmio);
     mmio.write32(0xCC000020, 0x00100000); // GP FIFO base
     // GXRedirectWriteGatherPipe uses base=0 and an arbitrary RAM write pointer.
     mmio.write32(0xCC00300C, 0);
@@ -105,5 +105,18 @@ int main() {
     require(mmio.read32(0xCC003014) == 0x10009000);
     for (unsigned i = 0; i < 32; ++i) require(ctx->mmu.read8(0x90009000+i) == 0x80+i);
     require(g_hw_fifo.empty());
+    // A double crosses a 32-byte redirect burst and wraps back to base.
+    for (unsigned i = 0; i < 29; ++i) GX_WGPIPE_Write8(0);
+    GX_WGPIPE_WriteF64(std::bit_cast<double>(uint64_t{0x0102030405060708}));
+    require(ctx->mmu.read8(0x9000901d) == 1 && ctx->mmu.read8(0x9000901f) == 3);
+    for (unsigned i = 0; i < 27; ++i) GX_WGPIPE_Write8(0);
+    require(ctx->mmu.read32(0x90009000) == 0x04050607);
+    require(ctx->mmu.read8(0x90009004) == 8 && g_hw_fifo.empty());
+    // A raw PE token can straddle stores of different widths.
+    mmio.write32(0xCC00300C, 0x00100000);
+    GX_WGPIPE_Write16(0x6147);
+    GX_WGPIPE_Write32(0x00cafe00);
+    require(g_hw_fifo == std::vector<uint8_t>({0x61,0x47,0x00,0xca,0xfe,0x00}));
+    require(mmio.read16(0xCC00100E) == 0xcafe);
     return 0;
 }
