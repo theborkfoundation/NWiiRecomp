@@ -1338,20 +1338,28 @@ bool process_pending_callbacks(CPUContext &ctx) {
       }
   }
 
-  uint32_t effective_intmr = nwii::runtime::hw::pi_intmr;
-  uint32_t vi_h = ctx.mmu.read32(0x800030A0);
-  if (vi_h != 0 && vi_h != 0xFFFFFFFF) {
-      effective_intmr |= 0x100;
+  // active_ints is pi_intsr & effective_intmr, so when pi_intsr is clear no
+  // interrupt can be delivered and the three handler-table reads below cannot
+  // change that. Reading them costs three guest memory accesses on every full
+  // poll, and the guest spends most polls with nothing pending.
+  const uint32_t pending_ints = nwii::runtime::hw::pi_intsr;
+  uint32_t active_ints = 0;
+  if (pending_ints != 0) {
+    uint32_t effective_intmr = nwii::runtime::hw::pi_intmr;
+    uint32_t vi_h = ctx.mmu.read32(0x800030A0);
+    if (vi_h != 0 && vi_h != 0xFFFFFFFF) {
+        effective_intmr |= 0x100;
+    }
+    uint32_t cp_h = ctx.mmu.read32(0x80003040 + 17 * 4);
+    if (cp_h != 0 && cp_h != 0xFFFFFFFF) {
+        effective_intmr |= 0x800;
+    }
+    uint32_t ipc_h = ctx.mmu.read32(0x80003040 + 27 * 4);
+    if (ipc_h != 0 && ipc_h != 0xFFFFFFFF) {
+        effective_intmr |= 0x4000;
+    }
+    active_ints = pending_ints & effective_intmr;
   }
-  uint32_t cp_h = ctx.mmu.read32(0x80003040 + 17 * 4);
-  if (cp_h != 0 && cp_h != 0xFFFFFFFF) {
-      effective_intmr |= 0x800;
-  }
-  uint32_t ipc_h = ctx.mmu.read32(0x80003040 + 27 * 4);
-  if (ipc_h != 0 && ipc_h != 0xFFFFFFFF) {
-      effective_intmr |= 0x4000;
-  }
-  uint32_t active_ints = nwii::runtime::hw::pi_intsr & effective_intmr;
 
   
   if (active_ints != 0 && (ctx.msr & 0x8000) &&
