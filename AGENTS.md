@@ -17,21 +17,30 @@ native C++. Four parts: `nWiiAnalyzer` (DOL/ELF parser), `nWiiRecomp`
 
 ## Test bed
 
-The low-end performance target is an **Orange Pi Zero 3** (`ssh opiz3`,
-aarch64 Cortex-A53, Ubuntu 24.04, Mali-G31). The game is deployed at
-`~/nwii-test`; `./run.sh` there launches it on the Weston `wayland-kiosk`
-socket.
+**The VM is the only working testbed as of 2026-11-21** (`ssh vm`): aarch64
+Ubuntu 22.04 under QEMU/HVF on the Mac, with Weston running in kiosk mode as a
+boot service on tty1. The game is deployed at `~/nwii-test`; `./run.sh` there
+launches it as a Wayland client against the compositor, which is the same path
+a consumer device takes (Wayland → compositor → EGL/GLES), not a direct SDL
+window.
 
-**Read [TESTBED.md](./TESTBED.md) before running or profiling anything on the
-board.** It records the hardware, the display path (Weston VNC/Pixman, so
-llvmpipe software rasterization — *not* the Mali GPU), the deploy/cross-build
-steps, the working `perf` invocation, and the current baseline fps/MIPS table.
+The **Orange Pi Zero 3** (`ssh opiz3`, Cortex-A53, Ubuntu 24.04, Mali-G31) is
+the real low-end target, but it has been offline since 2026-11-21 and is not
+reachable.
 
-To profile the real Mali-G31, use `SDL_VIDEODRIVER=offscreen ./run.sh`: SDL
-then creates an EGL context straight on the device and the game runs at 60 fps
-instead of ~34 fps on llvmpipe. That path is measurement-only (no visible
-output), and the llvmpipe path is what interactive play uses through
-`wayland-kiosk`.
+**Read [TESTBED.md](./TESTBED.md) before running or profiling anything.** It
+records both machines' hardware, the Weston setup and the two unit-file traps
+that break it, the deploy/cross-build steps, the working `perf` invocation, and
+the baseline fps/MIPS tables.
+
+Timings from the VM are **M4 timings, not A53 timings**. Use it to answer "did
+I break it" and "did this get better at all"; it cannot tell you whether
+something is fast enough on the class of hardware the port targets. A change
+that looks free on the M4 can dominate on an in-order core — the `game_id`
+comparison in the I-037 port was 0.01% on the Mac and 9.43% on the board. On
+the board, `SDL_VIDEODRIVER=offscreen ./run.sh` profiles the real Mali-G31
+(60 fps) instead of llvmpipe (~34 fps); that path has no visible output and is
+measurement-only.
 
 ## Working conventions
 

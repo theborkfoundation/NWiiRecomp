@@ -1,4 +1,57 @@
-# Test bed: Orange Pi Zero 3 (aarch64)
+# Test bed: aarch64 Linux
+
+Two targets, and they answer different questions. Use the VM for the work
+loop; the board is the only place that tells you how the game behaves on the
+class of hardware it is meant to run on.
+
+| | `vm` (primary, 2026-11-21 →) | `opiz3` (reference low-end) |
+| :--- | :--- | :--- |
+| CPU | 4x Apple M4 cores under HVF (`-accel=hvf -cpu host`) | 4x Cortex-A53, in-order, 1.5 GHz |
+| Display | Weston kiosk, virtio-gpu + llvmpipe | Weston kiosk, MALI-G31 + llvmpipe |
+| Answers | "did I break it", "did this improve things at all" | "is this fast enough on a real device" |
+| Status | available | **offline since 2026-11-21** |
+
+Numbers from the VM are *not* transferable to the board. An A53 is in-order
+and 3-4x narrower per clock, so a change that is free on the M4 can dominate
+there. That is not hypothetical: the `game_id` string comparison added in the
+I-037 port measured 0.01% on the Mac and **9.43% of all samples** on the board.
+Anything that touches a hot path needs a board run before it is called done.
+
+Host aliases: `ssh vm`, `ssh opiz3`. Game tree on both: `~/nwii-test`.
+
+## The VM test bed
+
+aarch64 Ubuntu 22.04 under QEMU/HVF on the Mac, reached at `ssh vm`
+(`127.0.0.1:2222`). It runs the real ARM64 binary, so it catches ABI, sysroot,
+and correctness problems. Its timing is M4 timing.
+
+Weston runs as a boot service on tty1 in kiosk mode, so the game presents the
+same way it does on a consumer device: a Wayland client going through the
+compositor's EGL/GLES stack, not a direct-to-window SDL path.
+
+```sh
+ssh vm systemctl status weston-kiosk    # boot service, enabled
+ssh vm journalctl -u weston-kiosk -f
+ssh vm ~/nwii-test/run.sh               # game as a Wayland client
+```
+
+Details worth knowing:
+
+- **virtio-gpu has no virgl**, so Mesa falls back to **llvmpipe** — software
+  rasterization. That matches the board's interactive path, so rendering work
+  is exercised, but the rasterizer is desktop LLVM, not the A53's.
+- `weston.ini` is `~/.config/weston/weston.ini`: `shell=kiosk-shell.so`,
+  `idle-time=0`, output `Virtual-1` at 640x480.
+- The unit must **not** have an `ExecStartPre=`; under `PAMName=login` each
+  one opens its own login session, the duplicate sessions break logind's seat
+  handover, and Weston exits 1 with `failed to get session seat`. Keep the
+  credential setup in the unit's `User=`/`Group=` only.
+- `Type=simple`, not `notify`: this Weston is not built against libsystemd, so
+  it never sends `sd_notify` and a `notify` unit times out at 25 s.
+- There is no screenshot protocol in this Weston build, so verification is
+  visual on the qemu window or via `NWII_PERF_LOG` counters.
+
+## Orange Pi Zero 3 (offline)
 
 The reference low-end ARM64 target for the Linux port. Everything here was
 verified live over SSH on 2026-11-19; treat it as the source of truth when
