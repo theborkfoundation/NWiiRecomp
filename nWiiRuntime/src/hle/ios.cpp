@@ -1198,11 +1198,16 @@ bool process_pending_callbacks(CPUContext &ctx) {
   // This uses the same cheap wall clock as read_timebase() rather than
   // steady_clock::now(): the poll body runs per branch, and a vDSO clock read
   // here was the second-most expensive symbol in this function (I-033).
+  // One counter read serves both the VI gate (raw wall ticks) and the console
+  // timebase (event scheduler). They were three separate
+  // mrs cntvct_el0 reads a few microseconds apart, and this body runs on every
+  // poll: 42% of the function's self time on the VM testbed.
+  const uint64_t now_wall = CPUContext::wall_ticks();
   {
       static const uint64_t s_vi_period =
           CPUContext::wall_ticks_per_sec() * 16683 / 1000000; // 59.94 Hz
       static uint64_t next_vi = CPUContext::wall_ticks();
-      const uint64_t now = CPUContext::wall_ticks();
+      const uint64_t now = now_wall;
       if (now >= next_vi) {
           next_vi = now + s_vi_period;
           if ((nwii::runtime::hw::pi_intmr.load() & 0x00000100) &&
@@ -1262,7 +1267,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
                   }
               });
       }
-      nwii::runtime::EventScheduler::get().advance(ctx, ctx.read_timebase());
+      nwii::runtime::EventScheduler::get().advance(ctx, ctx.timebase_from_wall(now_wall));
   }
 
   

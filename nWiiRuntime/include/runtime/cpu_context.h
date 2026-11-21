@@ -670,7 +670,17 @@ struct CPUContext {
   uint64_t read_timebase() const {
     if (tb_use_inst)
       return inst_count;
-    const uint64_t d = wall_ticks() - tb_start;
+    return timebase_from_wall(wall_ticks());
+  }
+
+  // Same conversion, from a wall-clock reading the caller already took. The
+  // poll body needs both the raw counter (VI is gated on it) and the console
+  // timebase (the event scheduler and DEC), and they are the same CNTVCT read
+  // microseconds apart; this lets it read the counter once.
+  uint64_t timebase_from_wall(uint64_t wall) const {
+    if (tb_use_inst)
+      return inst_count;
+    const uint64_t d = wall - tb_start;
     return (uint64_t)(((unsigned __int128)d * tb_scale) >> 32);
   }
 
