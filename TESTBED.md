@@ -10,7 +10,7 @@ Two targets, and they answer different questions.
 | OS | Ubuntu 22.04.5 (glibc 2.35), kernel 5.15.0-203 | Ubuntu 24.04.5 (glibc 2.39), kernel 6.1.31-sun50iw9 |
 | GPU | virtio-gpu, no virgl | Mali-G31 Bifrost (panfrost) |
 | Renderer | llvmpipe (software) | llvmpipe via Weston; panfrost via `offscreen` |
-| Status | **available** | **offline since 2026-11-21** |
+| Status | **available** | **reachable on 2026-11-21** |
 
 Game tree on both: `~/nwii-test`. The VM needs the display pinned to 640x480;
 the board's thermal zones idle at ~49-50 C so the A53s do not throttle early.
@@ -19,8 +19,7 @@ the board's thermal zones idle at ~49-50 C so the A53s do not throttle early.
 narrower per clock, so a change that is free on the M4 can dominate there. The
 `game_id` string comparison in the I-037 port measured 0.01% on the Mac and
 **9.43% of all samples** on the board. Anything touching a hot path needs a
-board run before it is called done — while the board is offline, say plainly
-that a change is unmeasured rather than presenting VM numbers as if they
+board run before it is called done; do not present VM numbers as if they
 transferred.
 
 ## Display path
@@ -123,7 +122,7 @@ any such conclusion with an A/B.
 
 On the board, `perf` is not preinstalled and the `/usr/bin/perf` wrapper
 refuses to run on the vendor kernel. Use the absolute binary path
-(`/usr/lib/linux-tools-6.8.0-149-generic/perf`), which also takes `-F 299 -g`
+(`/usr/lib/linux-tools/6.8.0-149-generic/perf`), which also takes `-F 299 -g`
 and records **unprivileged** — do not wrap it in `sudo` there either.
 
 Either way: **A/B must compare binaries built from the same tree.** Two

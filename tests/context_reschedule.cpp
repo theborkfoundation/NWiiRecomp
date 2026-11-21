@@ -1,5 +1,6 @@
 #include "runtime/config.h"
 #include "runtime/cpu_context.h"
+#include "runtime/hw/hw.h"
 
 #include <cstdlib>
 
@@ -104,6 +105,19 @@ int main() {
   ctx.mmu.write32(0x800000d4, 0);
   require(!process_pending_callbacks(ctx));
   require(ctx.pc == sentinel && ctx.ext_resched_pending);
+
+  // A normal branch can return early only while no work is pending. A
+  // vblank must still reach the full poll even inside the throttle window.
+  ctx.pc = resume;
+  ctx.ext_resched_pending = false;
+  ctx.inst_count = 1;
+  ctx.dec_irq_pending = false;
+  ctx.vblank_pending = false;
+  hw::pi_intsr = 0;
+  require(!process_pending_callbacks(ctx));
+  ctx.vblank_pending = true;
+  require(!process_pending_callbacks(ctx));
+  require(!ctx.vblank_pending);
 
   return 0;
 }

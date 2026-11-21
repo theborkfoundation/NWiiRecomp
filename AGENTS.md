@@ -64,6 +64,9 @@ intermediate and belongs in `scratch/`.
 
 ## Working conventions
 
+- For game performance comparisons, measure the game menu. Verify the menu
+  state with frame captures and align the performance samples to that interval;
+  startup screens and attract-mode footage are not menu measurements.
 - Generated sources live under `games/*/export/` and are gitignored. Delete
   `export/` (including its `build/`) before regenerating so nothing stale
   survives.

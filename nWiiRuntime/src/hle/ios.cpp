@@ -926,7 +926,28 @@ static void dbg_disp(const char *kind, uint32_t handler, uint32_t c,
 }
 
 
+static thread_local uint64_t s_last_poll_inst = 0;
+static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext &ctx);
+
 bool process_pending_callbacks(CPUContext &ctx) {
+  // The slow path handles scheduler transitions, idle polling and diagnostics.
+  // Ordinary translated code often polls again before its next hardware poll;
+  // avoid entering the large dispatcher stack frame in that common case.
+  // Keep this predicate in sync with the throttle in the slow path below.
+  if (ctx.pc != 0 && ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc &&
+      !ctx.ext_resched_pending && !s_env_sample() &&
+      (ctx.inst_count - s_last_poll_inst) < 2048) {
+    const bool dec_is_due = ctx.dec_irq_pending &&
+        ((ctx.read_timebase() - ctx.dec_written_tb) >= ctx.dec_value);
+    if (!dec_is_due && !ctx.vblank_pending &&
+        nwii::runtime::hw::pi_intsr.load(std::memory_order_relaxed) == 0 &&
+        ctx.pending_cb_count.load(std::memory_order_relaxed) == 0)
+      return false;
+  }
+  return process_pending_callbacks_slow(ctx);
+}
+
+static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext &ctx) {
   if (s_env_sample()) {
     static uint64_t sample_n = 0;
     if ((++sample_n % 20000) == 0) {
@@ -1070,8 +1091,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   // frames. Fixing I-029 needs the countdowns moved to an instruction or
   // wall-clock basis first, not a wider throttle here.
   if (ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc && ctx.pc != 0) {
-    static thread_local uint64_t last_poll_inst = 0;
-    if ((ctx.inst_count - last_poll_inst) < 2048) {
+    if ((ctx.inst_count - s_last_poll_inst) < 2048) {
       bool dec_is_due = ctx.dec_irq_pending && ((ctx.read_timebase() - ctx.dec_written_tb) >= ctx.dec_value);
       if (!dec_is_due && !ctx.vblank_pending &&
           (nwii::runtime::hw::pi_intsr.load(std::memory_order_relaxed) == 0) &&
@@ -1079,7 +1099,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
         return false;
       }
     }
-    last_poll_inst = ctx.inst_count;
+    s_last_poll_inst = ctx.inst_count;
   }
 
 
