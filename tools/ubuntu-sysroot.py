@@ -8,15 +8,17 @@ closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
 
-    tools/debian-sysroot.py                            # populate build/sysroot-arm64
-    tools/debian-sysroot.py --verify                   # compare the tree with the lock
-    tools/debian-sysroot.py --update-lock --dry-run    # refresh the lock, no downloads
-    tools/debian-sysroot.py --update-lock              # move to current versions
+    tools/ubuntu-sysroot.py                            # populate build/sysroot-arm64
+    tools/ubuntu-sysroot.py --verify                   # compare the tree with the lock
+    tools/ubuntu-sysroot.py --update-lock --dry-run    # refresh the lock, no downloads
+    tools/ubuntu-sysroot.py --update-lock              # move to current versions
 
-The resolved package list is recorded in tools/sysroots/arm64.lock. Later runs
-resolve against that lock, so a point release cannot silently change what the
-build links; --update-lock is the deliberate way to move. Only arm64 is
-supported: the Linux ARM64 build targets a 64-bit aarch64 userland.
+The target gets build/sysroot-arm64, and the resolved package list is recorded in
+tools/sysroots/arm64.lock. Later runs resolve against that lock, so an Ubuntu
+point release cannot silently change what the build links; --update-lock is the
+deliberate way to move. Only arm64 is supported: the Linux ARM64 build targets a
+64-bit aarch64 userland. The cross toolchain finds the tree by default and
+refuses to configure without one.
 
 The suite must match the target image, not merely be "a Debian-family
 archive": sonames differ between releases (Debian trixie ships FFmpeg 7.1 as
@@ -53,7 +55,10 @@ import urllib.request
 # target; aarch64 Ubuntu is published on the separate ports archive.
 MIRROR = "https://ports.ubuntu.com/ubuntu-ports"
 
-# Debian architecture name for the Linux ARM64 target (aarch64 userland).
+# Debian architecture name for the Linux ARM64 target (aarch64 userland). Kept
+# as a constant rather than a flag: a sysroot for anything else would be a tree
+# the toolchain never consumes, and the layout below (build/sysroot-arm64,
+# tools/sysroots/arm64.lock) reads cleanly against it.
 ARCH = "arm64"
 
 # SDL2 and the libraries its headers and build probes reference. The runtime
@@ -318,7 +323,8 @@ def pkgconfig_paths(dest, arch):
     ]
 
 
-def populate(args, root, arch):
+def populate(args, root):
+    arch = ARCH
     dest = os.path.abspath(args.dest or os.path.join(root, "build", "sysroot-" + arch))
     cache = os.path.abspath(args.cache or os.path.join(root, "build", "debs-" + arch))
     seeds = [name.strip() for name in args.packages.split(",") if name.strip()]
@@ -438,7 +444,7 @@ def main():
         print("PKG_CONFIG_LIBDIR=%s" % ":".join(pkgconfig_paths(dest, arch)))
         return 0
 
-    result = populate(args, root, ARCH)
+    result = populate(args, root)
     if result != 0:
         return result
 
