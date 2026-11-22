@@ -53,11 +53,6 @@ add_subdirectory(nWiiAnalyzer)
 add_subdirectory(nWiiRecomp)
 add_subdirectory(nWiiRuntime)
 
-option(NWII_BUILD_STUDIO "Build nWiiStudio GUI" OFF)
-if(NWII_BUILD_STUDIO)
-    add_subdirectory(nWiiStudio)
-endif()
-
 option(NWII_BUILD_TESTS "Build recompiler regression tests" OFF)
 if(NWII_BUILD_TESTS)
     enable_testing()

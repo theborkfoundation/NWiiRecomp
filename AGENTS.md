@@ -10,10 +10,10 @@ in `README.md`.
 
 ## What this repo is
 
-A static recompiler from GameCube/Wii PowerPC executables to native C++. Four
+A static recompiler from GameCube/Wii PowerPC executables to native C++. Three
 parts: `nWiiAnalyzer` (DOL/ELF parser), `nWiiRecomp` (PPC → C++), `nWiiRuntime`
-(HLE runtime, rasterizer, shader generator), `nWiiStudio` (ImGui debugger). The
-recompiler is a host tool; a generated `export/` is the target artifact.
+(HLE runtime, rasterizer, shader generator). The recompiler is a host tool; a
+generated `export/` is the target artifact.
 
 This fork targets **Linux ARM64 (aarch64)** and **Rayman Origins** (SOJE41), the
 one game configured and validated here.

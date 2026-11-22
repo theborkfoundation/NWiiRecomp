@@ -14,7 +14,6 @@ game configured and validated here; upstream carries the rest.
 | `nWiiAnalyzer` | DOL/ELF parsing, function boundaries, jump tables |
 | `nWiiRecomp` | Offline recompiler, PowerPC 750CL to C++ |
 | `nWiiRuntime` | HLE hardware, GX parser, rasterizer, shaders |
-| `nWiiStudio` | ImGui inspection tool (not built by default) |
 
 Always build `Release`: generated code is only usable with optimisation on.
 `./tools/ubuntu-sysroot.py && ./tools/zig-toolchain.sh arm64` prepares the

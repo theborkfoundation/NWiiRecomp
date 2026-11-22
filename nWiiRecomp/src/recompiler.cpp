@@ -721,8 +721,8 @@ bool Recompiler::generate_cmake_project(uint32_t entry_point) {
 std::string Recompiler::generate_function_cpp(const analyzer::Function &func) {
   std::stringstream ss;
 
-  // Standalone bodies (tests, Studio preview) do not come with the unit
-  // preamble, so provide the resume-dispatch macros here as well.
+  // Standalone bodies (tests) do not come with the unit preamble, so provide
+  // the resume-dispatch macros here as well.
   ss << "#ifndef NWII_RESUME_LOC\n";
   ss << "#define NWII_RESUME_LOC(A) (int32_t)((const char*)&&loc_##A - "
         "(const char*)&&loc_resume_body)\n";
