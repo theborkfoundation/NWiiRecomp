@@ -9,8 +9,8 @@
 #include <vector>
 
 // Cached once: these gate logging on the ARAM DMA and DSP mailbox paths, which
-// run per audio frame; an uncached getenv there is the PLAN.md Bottleneck 1
-// regression (environ_lock) and showed up as ~0.7% of samples on the A53.
+// run per audio frame; an uncached getenv there takes the global environment
+// lock and showed up as ~0.7% of samples on the A53.
 static const bool s_ar_trace = std::getenv("NWII_ARTRACE") != nullptr;
 static const bool s_snd_log = std::getenv("NWII_SNDLOG") != nullptr;
 static const bool s_dsp_ai_dbg = std::getenv("NWII_AIDBG") != nullptr;

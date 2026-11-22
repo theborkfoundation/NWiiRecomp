@@ -1,5 +1,5 @@
-// Regression tests for the translator/runtime edge cases in BUG_REPORT.md
-// Round 3: guest float->int conversion and PowerPC reservations.
+// Regression tests for the translator/runtime edge cases, Round 3: guest
+// float->int conversion and PowerPC reservations.
 
 #include <cassert>
 #include <cstdint>

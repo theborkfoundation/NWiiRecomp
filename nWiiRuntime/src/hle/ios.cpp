@@ -39,7 +39,7 @@ namespace {
     static const bool s_env_debug_val = (std::getenv("NWII_DEBUG") != nullptr);
     // Read once: these gate logging inside the context save/restore helpers,
     // which run on every interrupt and reschedule. Uncached getenv on a hot
-    // path is the PLAN.md Bottleneck 1 regression (environ_lock contention).
+    // path takes the global environment lock (environ_lock contention).
     static const bool s_env_dbg_save_val =
         (std::getenv("NWII_DBG_SAVE") != nullptr);
     static const bool s_env_dbg_ctx_val =

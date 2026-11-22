@@ -39,9 +39,8 @@ the IR pointer and Xbox gamepads work in both modes.
 `Space`/`Enter`/`K`/left click accept or jump; `J`/`Z`/`Shift`/right click
 attack or back; `Esc`/`P` pause; `-`/`Tab` select; arrows or `WASD` move.
 
-See [TESTBED.md](TESTBED.md) for the test beds and profiling,
-[AGENTS.md](AGENTS.md) for conventions, and
-[docs/linux-arm64-plan.md](docs/linux-arm64-plan.md) for the toolchain.
+See [AGENTS.md](AGENTS.md) for the build, the test beds, profiling and
+conventions, and [ISSUES.md](ISSUES.md) for open work.
 
 Licensed under [LICENSE](LICENSE). No Nintendo code, SDK or game data is
 included; supply your own extracted game.

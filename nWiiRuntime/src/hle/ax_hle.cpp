@@ -17,8 +17,8 @@
 #include <cstdlib>
 
 // Cached once: the AX output/mix path runs per audio frame, and getenv takes a
-// global lock. This is the PLAN.md Bottleneck 1 regression; it showed as ~0.9%
-// of samples on the A53 with the guest polling audio state.
+// global lock. It showed as ~0.9% of samples on the A53 with the guest polling
+// audio state.
 static const bool s_snd_log = std::getenv("NWII_SNDLOG") != nullptr;
 #include <cstring>
 #include <chrono>

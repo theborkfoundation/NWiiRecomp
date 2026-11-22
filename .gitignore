@@ -58,6 +58,6 @@ third_party/dolphin-sigdb/totaldb.dsy
 # Imported wii-lie project data
 games/
 .commandcode/
-PROGRESS.md
-BUG_REPORT.md
+# Working ledger of open issues: a local record, not a changelog.
+ISSUES.md
 !recomp_config_rayman.toml
