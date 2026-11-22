@@ -118,5 +118,24 @@ int main() {
     GX_WGPIPE_Write32(0x00cafe00);
     require(g_hw_fifo == std::vector<uint8_t>({0x61,0x47,0x00,0xca,0xfe,0x00}));
     require(mmio.read16(0xCC00100E) == 0xcafe);
+
+    // An enabled CP drains queued bytes once, raises its breakpoint, and
+    // subsequent polls of the empty FIFO must not duplicate the batch.
+    g_hw_fifo.clear();
+    constexpr uint32_t cp_base = 0x00110000;
+    ctx->mmu.write32(0x80000000 | cp_base, 0x12345678);
+    mmio.write32(0xCC000020, cp_base);
+    mmio.write32(0xCC000024, cp_base + 0x100);
+    mmio.write32(0xCC000038, cp_base);
+    mmio.write32(0xCC000034, cp_base);
+    mmio.write32(0xCC00003C, cp_base + 4);
+    mmio.write32(0xCC000002, 1);
+    mmio.write32(0xCC000034, cp_base + 4);
+    require(g_hw_fifo == std::vector<uint8_t>({0x12,0x34,0x56,0x78}));
+    require(mmio.read32(0xCC000038) == cp_base + 4);
+    require((mmio.read16(0xCC000000) & 0x0f) == 0x0f);
+    require((pi_intsr.load() & 0x800) != 0);
+    cp_process_fifo();
+    require(g_hw_fifo == std::vector<uint8_t>({0x12,0x34,0x56,0x78}));
     return 0;
 }

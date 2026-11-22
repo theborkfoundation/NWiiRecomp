@@ -8,6 +8,7 @@ namespace nwii::runtime {
 CPUContext *g_ctx_ptr = nullptr;
 MMU *g_mmu = nullptr;
 uint32_t g_debug_pc = 0;
+extern int g_ipc_interrupt_delay;
 }
 extern "C" void run_game(nwii::runtime::CPUContext &) { std::abort(); }
 
@@ -118,6 +119,37 @@ int main() {
   ctx.vblank_pending = true;
   require(!process_pending_callbacks(ctx));
   require(!ctx.vblank_pending);
+
+  // The decrementer also bypasses the throttle when due; its clock can be
+  // driven by instruction count for a deterministic boundary check.
+  ctx.vblank_pending = false;
+  hw::pi_intsr = 0;
+  ctx.msr = 0;
+  ctx.tb_use_inst = true;
+  ctx.inst_count = 100;
+  ctx.dec_irq_pending = true;
+  ctx.dec_written_tb = 95;
+  ctx.dec_value = 6;
+  g_ipc_interrupt_delay = 2;
+  require(!process_pending_callbacks(ctx));
+  require(g_ipc_interrupt_delay == 2);
+  ctx.inst_count = 101;
+  require(!process_pending_callbacks(ctx));
+  require(g_ipc_interrupt_delay == 1);
+
+  // Idle polling must still tick an armed DI delay on every call, and an
+  // unarmed delay must stay idle.
+  ctx.pc = 0x80006ccc;
+  ctx.gpr[13] = 0;
+  ctx.in_callback = true;
+  hw::pi_intsr = 0;
+  hw::g_di_interrupt_delay = 2;
+  require(!process_pending_callbacks(ctx));
+  require(hw::g_di_interrupt_delay == 1);
+  require(!process_pending_callbacks(ctx));
+  require(hw::g_di_interrupt_delay == 0);
+  require(!process_pending_callbacks(ctx));
+  require(hw::g_di_interrupt_delay == 0);
 
   return 0;
 }
