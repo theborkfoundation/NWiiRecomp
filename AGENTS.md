@@ -109,7 +109,9 @@ takes, not a direct SDL window. `journalctl -u weston-kiosk -f` follows it.
 ### Profiling
 
 `NWII_PERF=1 NWII_PERF_LOG=<csv>` is the portable instrument: it needs no
-privileges and works on both beds, one row per 5-second period. `NWII_PERF=2` is
+privileges and works on both beds, one row per `NWII_PERF_INTERVAL_MS`
+(default 1000, so one row per second). `frames` is the count in *that period*,
+not a running total. `NWII_PERF=2` is
 the on-screen overlay. The column order is the header the runtime writes
 (`nWiiRuntime/src/core/perf_overlay.cpp`); the ones that matter most are `fps`,
 `p99_ms`, `mips`, `parse_ms`, `render_ms`, `tex_up`, `shaders`, and the tails
@@ -155,6 +157,27 @@ is guest frames, not MIPS — software rasterization was costing about half the
 total CPU. Over 70% of the guest thread is runtime bookkeeping, the largest item
 being the timebase read; 37.2% of guest PC samples land on the idle spin
 `0x80006CCC` (`ISSUES.md` I-029).
+
+### Measuring translator changes
+
+`fps` and average `mips` are **not** valid metrics for a translator change, and
+both mislead in the same direction. The guest is VI-capped at 60 Hz and the
+emulator thread busy-waits, so in gameplay steady state a faster translator only
+makes the idle spin longer: `fps` stays pegged while `mips` goes **up**. In the
+worst case a change looks like a 10-20% "speedup" on MIPS while doing nothing.
+
+Use `tools/nwii_menu_bench.py`: wall time to reach a fixed guest frame count on
+the save-file menu, which is the compute-bound phase (below 60 fps, 250-360
+guest MIPS). `tools/nwii_bench.py` does the same for the boot milestone. Both
+report spread, and both take `-n` so an A/B can interleave baseline and
+candidate to cancel drift.
+
+**Verify the screen, do not assume it.** `NWII_SCREENSHOT=<prefix>
+NWII_SHOT_EVERY=<n>` writes BMPs (frames are numbered globally, and
+`NWII_SHOT_FROM`/`NWII_SHOT_TO` bound the range). Read the captures: the
+save-file menu shows "Select a file" with save slots. Both tools use the
+sequence `NWII_AUTOPRESS=240:0x0800:6,2000:0x0800:6,2400:0x0100:6`, which is
+verified to reach it.
 
 ## Diagnostics
 

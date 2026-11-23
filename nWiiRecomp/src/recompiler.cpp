@@ -835,6 +835,20 @@ void Recompiler::emit_function(std::ostream &out,
       last_addr = inst.address;
   }
 
+  // Accumulate the guest instruction count in a local instead of doing a
+  // read-modify-write on ctx.inst_count at every instruction. That is a
+  // load/add/store through the context pointer at all ~1.8M emitted sites, and
+  // because the member is reachable from every guest store it can never be
+  // kept in a register. The count is only *read* at the poll points (backward
+  // branches) and by the NWII_INSTTB timebase, so a local keeps the same
+  // observable value wherever it is observed, and the destructor covers every
+  // early return.
+  out << "    struct NwiiInstCount {\n";
+  out << "        CPUContext& c; uint64_t n = 0;\n";
+  out << "        void flush() { if (n) { c.inst_count += n; n = 0; } }\n";
+  out << "        ~NwiiInstCount() { flush(); }\n";
+  out << "    } nwii_ic{ctx};\n";
+
   // Guest code can re-enter a function at any instruction: callbacks and
   // interrupts save the current PC, indirect branches (jump tables) and
   // restored thread contexts can all name an interior address.
@@ -908,7 +922,7 @@ void Recompiler::emit_instruction(
   ppc::Instruction ppc_inst(inst.opcode);
 
   out << "loc_" << hex8(inst.address) << ": ;\n";
-  out << "    ++ctx.inst_count;\n";
+  out << "    ++nwii_ic.n;\n";
   out << "    // 0x" << std::hex << std::setfill('0') << std::setw(8)
       << inst.address << ": ";
   out << std::setfill('0') << std::setw(8) << inst.opcode << std::dec << "\n";
@@ -1151,6 +1165,7 @@ void Recompiler::emit_instruction(
 
       out << "    ctx.pc = 0x" << std::hex << std::uppercase << inst.address
           << std::dec << ";\n";
+      out << "    nwii_ic.flush();\n";
       out << "    if (process_pending_callbacks(ctx)) return;\n";
       out << "    if (nwii::runtime::trace_spin() && (ctx.inst_count % 10000000) == 0) { std::cout << "
              "\"Spinning at PC: 0x\" << std::hex << 0x"
@@ -1230,12 +1245,13 @@ void Recompiler::emit_instruction(
         if (cross_refs)
           cross_refs->insert(ext_name);
         if (cond_expr == "true") {
+          out << "    nwii_ic.flush();\n";
           out << "    ctx.pc = 0x" << std::hex << std::uppercase << target
               << std::dec << "; " << ext_name << "(ctx); return;\n";
         } else {
-          out << "    if (" << cond_expr << ") { ctx.pc = 0x" << std::hex
-              << std::uppercase << target << std::dec << "; " << ext_name
-              << "(ctx); return; }\n";
+          out << "    if (" << cond_expr << ") { nwii_ic.flush(); ctx.pc = 0x"
+              << std::hex << std::uppercase << target << std::dec << "; "
+              << ext_name << "(ctx); return; }\n";
         }
       } else {
         if (cond_expr == "true") {
@@ -1258,6 +1274,7 @@ void Recompiler::emit_instruction(
 
       out << "    ctx.pc = 0x" << std::hex << std::uppercase << inst.address
           << std::dec << ";\n";
+      out << "    nwii_ic.flush();\n";
       out << "    if (process_pending_callbacks(ctx)) return;\n";
       out << "    if (nwii::runtime::trace_spin() && (ctx.inst_count % 10000000) == 0) { std::cout << "
              "\"Spinning at PC: 0x\" << std::hex << 0x"
@@ -1293,6 +1310,7 @@ void Recompiler::emit_instruction(
         if (is_mapped) {
           if (cross_refs)
             cross_refs->insert(target_name);
+          out << "    nwii_ic.flush();\n";
           out << "    ctx.pc = 0x" << std::hex << std::uppercase << target
               << std::dec << "; ";
           out << target_name << "(ctx);\n";
@@ -1340,6 +1358,7 @@ void Recompiler::emit_instruction(
         out << "        ctx.pc = ctx.srr0;  // rfi: jump to SRR0\n";
         out << "        ctx.dispatch_saved_ctx = 0; // exit ISR\n";
         out << "        if (!ee_was && (ctx.msr & 0x8000)) {\n";
+        out << "            nwii_ic.flush();\n";
         out << "            if (process_pending_callbacks(ctx)) return;\n";
         out << "        }\n";
         out << "    }\n";
@@ -1831,8 +1850,10 @@ void Recompiler::emit_instruction(
       uint32_t spr_top    = (ppc_inst.value() >> 11) & 0x1F;
       uint32_t spr = (spr_top << 5) | spr_bottom;
       if (spr == 269) { 
+        out << "    nwii_ic.flush();\n";
         out << "    ctx.gpr[" << rD << "] = (uint32_t)(ctx.read_timebase() >> 32); // mftbu\n";
       } else { 
+        out << "    nwii_ic.flush();\n";
         out << "    ctx.gpr[" << rD << "] = (uint32_t)(ctx.read_timebase() & 0xFFFFFFFF); // mftb\n";
       }
 
@@ -2244,6 +2265,7 @@ void Recompiler::emit_instruction(
       out << "        if (!ee_was && (ctx.msr & 0x8000)) {\n";
       out << "            ctx.pc = 0x" << std::hex << std::uppercase
           << (inst.address + 4) << std::dec << ";\n";
+      out << "            nwii_ic.flush();\n";
       out << "            if (process_pending_callbacks(ctx)) return;\n";
       out << "        }\n";
       out << "    }\n";
