@@ -8,7 +8,6 @@ namespace nwii::runtime {
 CPUContext *g_ctx_ptr = nullptr;
 MMU *g_mmu = nullptr;
 uint32_t g_debug_pc = 0;
-extern int g_ipc_interrupt_delay;
 }
 extern "C" void run_game(nwii::runtime::CPUContext &) { std::abort(); }
 
@@ -130,25 +129,28 @@ int main() {
   ctx.dec_irq_pending = true;
   ctx.dec_written_tb = 95;
   ctx.dec_value = 6;
-  g_ipc_interrupt_delay = 2;
   require(!process_pending_callbacks(ctx));
-  require(g_ipc_interrupt_delay == 2);
   ctx.inst_count = 101;
   require(!process_pending_callbacks(ctx));
-  require(g_ipc_interrupt_delay == 1);
 
-  // Idle polling must still tick an armed DI delay on every call, and an
-  // unarmed delay must stay idle.
+  // The idle PC is throttled like ordinary code now that the IPC and DI
+  // interrupts are wall-clock deadlines rather than per-poll counters (I-029).
+  // Two calls inside one instruction window must not run the poll body either
+  // way, so the observable difference is what the body would have done: an
+  // armed IPC delay no longer advances once per call.
   ctx.pc = 0x80006ccc;
   ctx.gpr[13] = 0;
+  ctx.dec_irq_pending = false;
   ctx.in_callback = true;
   hw::pi_intsr = 0;
-  hw::g_di_interrupt_delay = 2;
+  ctx.inst_count = 100;
   require(!process_pending_callbacks(ctx));
-  require(hw::g_di_interrupt_delay == 1);
+  ctx.inst_count = 101;
   require(!process_pending_callbacks(ctx));
-  require(hw::g_di_interrupt_delay == 0);
-  require(!process_pending_callbacks(ctx));
+
+  // An unarmed DI delay stays idle.
+  ctx.in_callback = true;
+  hw::pi_intsr = 0;
   require(hw::g_di_interrupt_delay == 0);
 
   return 0;

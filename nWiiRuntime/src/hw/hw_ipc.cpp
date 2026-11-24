@@ -10,7 +10,6 @@
 namespace nwii::runtime {
     extern CPUContext* g_ctx_ptr;
     extern MMU* g_mmu;
-    extern int g_ipc_interrupt_delay;
 }
 
 namespace nwii::runtime::hw {
@@ -32,36 +31,74 @@ uint32_t ipc_ppc_msg = 0;
 
 static std::deque<uint32_t> g_ipc_reply_queue;
 
+// The reply-to-interrupt delay is wall-clock, not a poll-iteration count.
+//
+// These were `g_ipc_interrupt_delay = 5 / 50`, decremented once per ipc_tick()
+// call. A poll is one per guest branch, so the delay the guest actually
+// observed depended on how fast the host ran the loop, and - the part that
+// mattered - the idle thread at 0x80006CCC had to keep polling at full rate for
+// the countdown to reach zero, so its poll could not be throttled (I-029).
+//
+// A deadline is host-speed independent and lets the idle poll be throttled like
+// any other guest PC. The magnitudes are unchanged in real time: the measured
+// idle poll rate is ~33.5 M/s, so 5 polls was ~150 ns and 50 polls ~1.5 us,
+// which is also what 5 and 50 guest instructions cost at the ~35 MIPS the
+// guest sustains in steady state.
+static constexpr uint64_t kIpcReplyDelayNs = 150;
+static constexpr uint64_t kIpcPostDelayNs = 1500;
+static uint64_t g_ipc_delay_deadline = 0;
+
+// The delay is compared against the host's wall clock, which a unit test cannot
+// advance. This bias is zero in production (one add per tick) and lets a test
+// place the deadline in the past without sleeping.
+static uint64_t g_ipc_clock_bias = 0;
+
+void ipc_test_advance_ticks(uint64_t ticks) { g_ipc_clock_bias += ticks; }
+
+static uint64_t ipc_now() { return CPUContext::wall_ticks() + g_ipc_clock_bias; }
+
+static uint64_t ns_to_wall_ticks(uint64_t ns) {
+    const uint64_t ticks_per_sec = CPUContext::wall_ticks_per_sec();
+    return ticks_per_sec ? (ticks_per_sec * ns) / 1000000000ull : 0;
+}
+
+static void ipc_arm_delay(uint64_t ns) {
+    g_ipc_delay_deadline = ipc_now() + ns_to_wall_ticks(ns);
+}
+
+static bool ipc_delay_pending() {
+    return g_ipc_delay_deadline != 0;
+}
+
 void check_deliver_queued_reply() {
-    if (!(ipc_ppc_ctrl & 6) && !ipc_irq_flags && nwii::runtime::g_ipc_interrupt_delay == 0 && !g_ipc_reply_queue.empty()) {
+    if (!(ipc_ppc_ctrl & 6) && !ipc_irq_flags && !ipc_delay_pending() && !g_ipc_reply_queue.empty()) {
         ipc_arm_msg = g_ipc_reply_queue.front();
         g_ipc_reply_queue.pop_front();
         ipc_arm_ctrl = 0x00000003;
         ipc_ppc_ctrl &= ~0x01;
         ipc_ppc_ctrl |= 0x06;
-        nwii::runtime::g_ipc_interrupt_delay = 5;
+        ipc_arm_delay(kIpcReplyDelayNs);
     }
 }
 
 static void push_reply(uint32_t req_addr) {
     uint32_t msg = req_addr & 0x1FFFFFFF;
-    if (g_ipc_reply_queue.empty() && !(ipc_ppc_ctrl & 6) && !ipc_irq_flags && nwii::runtime::g_ipc_interrupt_delay == 0) {
+    if (g_ipc_reply_queue.empty() && !(ipc_ppc_ctrl & 6) && !ipc_irq_flags && !ipc_delay_pending()) {
         ipc_arm_msg = msg;
         ipc_arm_ctrl = 0x00000003;
         ipc_ppc_ctrl &= ~0x01;
         ipc_ppc_ctrl |= 0x06;
-        nwii::runtime::g_ipc_interrupt_delay = 50;
+        ipc_arm_delay(kIpcPostDelayNs);
     } else {
         g_ipc_reply_queue.push_back(msg);
     }
 }
 
 void ipc_tick() {
-    if (nwii::runtime::g_ipc_interrupt_delay > 0) {
-        nwii::runtime::g_ipc_interrupt_delay--;
-        if (nwii::runtime::g_ipc_interrupt_delay == 0) {
-            ipc_update_interrupt();
-        }
+    if (ipc_delay_pending()) {
+        if (ipc_now() < g_ipc_delay_deadline) return;
+        g_ipc_delay_deadline = 0;
+        ipc_update_interrupt();
         return;
     }
     check_deliver_queued_reply();

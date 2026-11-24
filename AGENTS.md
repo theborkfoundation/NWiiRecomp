@@ -158,26 +158,36 @@ total CPU. Over 70% of the guest thread is runtime bookkeeping, the largest item
 being the timebase read; 37.2% of guest PC samples land on the idle spin
 `0x80006CCC` (`ISSUES.md` I-029).
 
-### Measuring translator changes
+### Measuring a change to the hot path
 
-`fps` and average `mips` are **not** valid metrics for a translator change, and
-both mislead in the same direction. The guest is VI-capped at 60 Hz and the
-emulator thread busy-waits, so in gameplay steady state a faster translator only
-makes the idle spin longer: `fps` stays pegged while `mips` goes **up**. In the
-worst case a change looks like a 10-20% "speedup" on MIPS while doing nothing.
+`fps` and average `mips` are **not** valid metrics, for a translator change or a
+runtime one, and they mislead in the same direction. The guest is VI-capped at
+60 Hz and the emulator thread busy-waits at 100 % of a core, so making work
+cheaper just makes the idle spin longer: `fps` stays pegged and `mips` goes
+**up**. I-029 is the worked example - collapsing the poll body from 2769 to 20
+samples per profile moved `mips` 174.8 -> 251.0 (+44 %) and CPU time by 0.0 %.
+Neither number alone is ever the answer.
 
-Use `tools/nwii_menu_bench.py`: wall time to reach a fixed guest frame count on
-the save-file menu, which is the compute-bound phase (below 60 fps, 250-360
-guest MIPS). `tools/nwii_bench.py` does the same for the boot milestone. Both
-report spread, and both take `-n` so an A/B can interleave baseline and
-candidate to cancel drift.
+Measure the thing the change is supposed to move:
+
+- **Guest throughput** - `tools/nwii_menu_bench.py`, wall time to a fixed guest
+  frame count on the save-file menu (below 60 fps, 250-360 guest MIPS).
+  `tools/nwii_bench.py` does the same for the boot milestone. Both report spread
+  and take `-n` so an A/B can interleave baseline and candidate to cancel drift.
+- **Host CPU** - `/usr/bin/time -p` (or `time`) around a fixed
+  `NWII_MAX_SECONDS` window. This is the only metric that can see a change to
+  work that is hidden behind the spin.
+
+Both, or the result is not evidence.
 
 **Verify the screen, do not assume it.** `NWII_SCREENSHOT=<prefix>
 NWII_SHOT_EVERY=<n>` writes BMPs (frames are numbered globally, and
 `NWII_SHOT_FROM`/`NWII_SHOT_TO` bound the range). Read the captures: the
 save-file menu shows "Select a file" with save slots. Both tools use the
 sequence `NWII_AUTOPRESS=240:0x0800:6,2000:0x0800:6,2400:0x0100:6`, which is
-verified to reach it.
+verified to reach it. Note the menu is reached around frame 3300: a benchmark
+target of 2400 measures the stretch *before* it and will show no difference
+between two binaries that differ only on that screen.
 
 ## Diagnostics
 

@@ -752,8 +752,6 @@ namespace nwii::runtime {
 
 bool g_ipc_reply_pending = false;
 
-int g_ipc_interrupt_delay = 0;
-
 
 static constexpr uint32_t CALLBACK_STACK_TOP_DEFAULT = 0x816F0000;
 
@@ -934,7 +932,10 @@ bool process_pending_callbacks(CPUContext &ctx) {
   // Ordinary translated code often polls again before its next hardware poll;
   // avoid entering the large dispatcher stack frame in that common case.
   // Keep this predicate in sync with the throttle in the slow path below.
-  if (ctx.pc != 0 && ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc &&
+  // The idle PC (0x80006ccc) is included: it is a bare goto loop that polls on
+  // every iteration, and its countdown-driven work is wall-clock based now, so
+  // throttling it changes nothing the guest can observe (I-029).
+  if (ctx.pc != 0 && ctx.pc != 0xFFFFFFFC &&
       !ctx.ext_resched_pending && !s_env_sample() &&
       (ctx.inst_count - s_last_poll_inst) < 2048) {
     const bool dec_is_due = ctx.dec_irq_pending &&
@@ -1079,18 +1080,20 @@ static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext 
     return false;
   }
 
-  // Fast path: if not at a thread context switch (0xFFFFFFFC) or idle (0 or 0x80006ccc),
-  // throttle hardware polling and interrupt scanning to periodic intervals.
+  // Fast path: if not at a thread context switch (0xFFFFFFFC), throttle hardware
+  // polling and interrupt scanning to periodic intervals.
   //
-  // Note: 0x80006ccc (the RVL idle thread) is deliberately NOT throttled. The
-  // poll body drives per-call countdowns - ipc_tick() decrements
-  // g_ipc_interrupt_delay (5 and 50) and di_tick() g_di_interrupt_delay - so
-  // throttling the call rate changes the real-time delay before those
-  // interrupts are delivered. Measured on the Orange Pi Zero 3: adding the idle
-  // PC to the guard made boot reach the first drawn frame ~2 s later and drop
-  // frames. Fixing I-029 needs the countdowns moved to an instruction or
-  // wall-clock basis first, not a wider throttle here.
-  if (ctx.pc != 0xFFFFFFFC && ctx.pc != 0x80006ccc && ctx.pc != 0) {
+  // The RVL idle thread (0x80006ccc) is included. It is a bare goto loop that
+  // calls this on every iteration - 33.5 M polls/s measured, 96.7% of all polls,
+  // and 51% of emulator-thread samples - so leaving it unthrottled meant the
+  // whole body ran at full rate for no benefit (I-029).
+  //
+  // It used to be excluded because the poll body drove per-call countdowns:
+  // ipc_tick() decremented a 5/50 counter and di_tick() another one, so the
+  // interrupt delay was measured in poll calls and throttling stretched it in
+  // real time. Both are wall-clock deadlines now, so the rate no longer changes
+  // when the interrupt fires and the throttle is safe.
+  if (ctx.pc != 0xFFFFFFFC && ctx.pc != 0) {
     if ((ctx.inst_count - s_last_poll_inst) < 2048) {
       bool dec_is_due = ctx.dec_irq_pending && ((ctx.read_timebase() - ctx.dec_written_tb) >= ctx.dec_value);
       if (!dec_is_due && !ctx.vblank_pending &&

@@ -29,6 +29,9 @@ inline void clear_pi_interrupt(uint32_t mask) {
 void vi_trigger_interrupt(bool force = false);
 void ipc_post_reply(uint32_t req_addr); 
 void ipc_tick();
+// Test seam: the IPC reply delay is a wall-clock deadline, so a unit test that
+// drives ipc_tick() in a loop advances this bias instead of sleeping.
+void ipc_test_advance_ticks(uint64_t ticks);
 void ai_update();
 void dsp_trigger_interrupt();
 
