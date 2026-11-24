@@ -1068,7 +1068,14 @@ int main(int argc, char **argv) {
         std::cout << "[GXDBG] only blended " << (nwii::runtime::gxdbg::only_blend ? "on" : "off") << std::endl;
         break;
       }
+    };
+
+    // One place builds the title, so the per-second stats refresh and the
+    // debug hotkey markers do not overwrite each other.
+    static char s_title_stats[96] = ""; // "guest 56.0/59.9 fps (93%)  235 MIPS"
+    auto compose_title = [&window]() {
       std::string title = "NWiiRecomp";
+      if (s_title_stats[0]) { title += "  "; title += s_title_stats; }
       if (nwii::runtime::gxdbg::no_alpha_test) title += " [noAT]";
       if (nwii::runtime::gxdbg::alpha_view) title += " [alphaView]";
       if (nwii::runtime::gxdbg::no_tex) title += " [noTex]";
@@ -1434,16 +1441,13 @@ int main(int argc, char **argv) {
         if (next && !prev_next) {
           solo_idx = (solo_idx + 1) % 11;
           nwii::runtime::gxdbg::solo_count = solo_steps[solo_idx];
-          std::string t = "NWiiRecomp";
-          if (nwii::runtime::gxdbg::solo_count)
-            t += " [solo=" + std::to_string(nwii::runtime::gxdbg::solo_count) + "]";
-          SDL_SetWindowTitle(window, t.c_str());
+          compose_title();
           std::cout << "[GXDBG] solo=" << nwii::runtime::gxdbg::solo_count << std::endl;
         }
         if (prevk && !prev_prev) {
           solo_idx = 0;
           nwii::runtime::gxdbg::solo_count = 0;
-          SDL_SetWindowTitle(window, "NWiiRecomp");
+          compose_title();
           std::cout << "[GXDBG] solo=0" << std::endl;
         }
         prev_next = next;
@@ -1463,7 +1467,7 @@ int main(int argc, char **argv) {
           std::snprintf(b, sizeof(b), "[GXDBG] skipTex=%08X",
                         nwii::runtime::gxdbg::skip_tex_addr);
           std::cout << b << std::endl;
-          SDL_SetWindowTitle(window, b);
+          compose_title();
         }
         prev_tex = texk;
         static bool prev_n = false, prev_b = false;
@@ -1503,6 +1507,61 @@ int main(int argc, char **argv) {
         rvl_feed_input(*ctx);
       }
       maybe_memdump();
+
+      // Window title: is the guest keeping up with the frame clock the game
+      // expects it to run at?
+      //
+      // fps and frame_ms cannot answer that - the pacer below pins the present
+      // thread at 59.94 Hz and the guest is VI-capped, so both read ~60 while
+      // the machine starves. Measured with 12 CPU hogs on the M4, fps stayed
+      // 59.9 and frame_ms 16.7 while the guest fell from 56.0 to 52.8 frames/s:
+      // what actually slips is how many frames the parser completes.
+      //
+      //   guest  - completed guest frames per second, against 59.94
+      //   mips   - the sensitive early warning; it fell 235 -> 107 under the
+      //            same load, long before frames moved
+      //
+      // Only redrawn once a second: SDL_SetWindowTitle is a round trip to the
+      // window server and this loop runs per frame.
+      {
+        extern uint64_t g_stat_frames;
+        static auto title_t0 = std::chrono::steady_clock::now();
+        static uint64_t title_frames = 0;
+        static uint64_t title_inst = 0;
+        static bool title_init = false;
+        if (!title_init) {
+          title_init = true;
+          title_frames = g_stat_frames;
+          title_inst = nwii::runtime::g_ctx_ptr
+                           ? nwii::runtime::g_ctx_ptr->inst_count
+                           : 0;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - title_t0).count();
+        if (elapsed >= 1.0) {
+          const uint64_t frames = g_stat_frames;
+          const uint64_t inst = nwii::runtime::g_ctx_ptr
+                                    ? nwii::runtime::g_ctx_ptr->inst_count
+                                    : 0;
+          const double fps_guest = (double)(frames - title_frames) / elapsed;
+          const double mips = (double)(inst - title_inst) / elapsed / 1.0e6;
+          title_frames = frames;
+          title_inst = inst;
+
+          // The field rate is 59.94 Hz; show the target as 60 so a healthy run
+          // does not read "60.0/59.9". The percentage can legitimately exceed
+          // 100 briefly (frames counted across a period boundary), so clamp it.
+          int pct = (int)(100.0 * fps_guest / 59.94 + 0.5);
+          if (pct > 100) pct = 100;
+          std::snprintf(s_title_stats, sizeof(s_title_stats),
+                        "guest %.1f/60 fps (%d%%)  %.0f MIPS",
+                        fps_guest, pct, mips);
+          compose_title();
+          title_t0 = now;
+        }
+      }
+
       // Pace the guest to the display rate. Relying on the swap interval is not
       // enough: when the swap does not actually block, the guest's frame clock
       // free-runs and every frame-based timer (animations, intro movie, menu
