@@ -1166,6 +1166,7 @@ void FifoParser::Parse(std::vector<uint8_t>& fifo, std::vector<GXCommand>& comma
     static bool skin_init = (g_skindbg = std::getenv("NWII_SKINDBG") != nullptr, true);
     (void)skin_init;
     if (g_skindbg) skin_report();
+
     size_t offset = 0;
     ParseStream(fifo, offset, commands, 0);
 
@@ -1554,7 +1555,29 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             if (fifo_size >= offset + 64 && !prev_nop) {
                 const uint8_t nb = fifo[offset];
                 const bool nopish = (nb == 0x00 || nb == 0x44 || nb == 0x48);
-                if (!nopish && CommandSizeAt(fifo, offset) == 0) {
+
+                // CommandSizeAt returns 0 for two very different things: a byte
+                // that cannot start a command at all, and a well-formed command
+                // whose payload has not fully arrived. Only the first is a
+                // defect, and this check is about the second.
+                //
+                // A draw (0x80..0xB7) is sized 3 + count*stride against the
+                // current VAT. A 24-byte vertex and three vertices is 75 bytes,
+                // past the 64-byte lookahead above, so a perfectly good stream
+                // reported "next byte 0x80 is not a command" whenever a draw
+                // outran the bytes buffered so far. Ask the header whether the
+                // payload simply extends beyond the buffer, and let the wait
+                // path below handle it.
+                bool looks_like_draw = nb >= 0x80 && nb <= 0xB7;
+                if (looks_like_draw && offset + 3 <= fifo_size) {
+                    const size_t count =
+                        (size_t)((fifo[offset + 1] << 8) | fifo[offset + 2]);
+                    const size_t available = fifo_size - offset - 3;
+                    // Three bytes per vertex is the smallest real stride, so a
+                    // count that cannot fit even at that size is not a draw.
+                    if (count * 3 > available) looks_like_draw = false;
+                }
+                if (!nopish && !looks_like_draw && CommandSizeAt(fifo, offset) == 0) {
                     char d[160];
                     std::snprintf(d, sizeof(d),
                                   "cmd 0x%02X at 0x%zX sized %zu -> next byte 0x%02X "
