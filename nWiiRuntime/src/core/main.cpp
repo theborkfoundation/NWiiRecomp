@@ -1041,7 +1041,7 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("NWII_MAX_SECONDS")) max_seconds = std::atof(e);
     const auto run_start = std::chrono::steady_clock::now();
 
-    auto gx_toggle = [&window](int which) {
+    auto gx_toggle = [](int which) {
       switch (which) {
       case 1:
         nwii::runtime::gxdbg::no_alpha_test = !nwii::runtime::gxdbg::no_alpha_test;
@@ -1070,29 +1070,11 @@ int main(int argc, char **argv) {
       }
     };
 
-    // One place builds the title, so the per-second stats refresh and the
-    // debug hotkey markers do not overwrite each other.
-    static char s_title_stats[96] = ""; // "guest 56.0/59.9 fps (93%)  235 MIPS"
-    auto compose_title = [&window]() {
-      std::string title = "NWiiRecomp";
-      if (s_title_stats[0]) { title += "  "; title += s_title_stats; }
-      if (nwii::runtime::gxdbg::no_alpha_test) title += " [noAT]";
-      if (nwii::runtime::gxdbg::alpha_view) title += " [alphaView]";
-      if (nwii::runtime::gxdbg::no_tex) title += " [noTex]";
-      if (nwii::runtime::gxdbg::no_blend) title += " [noBlend]";
-      if (nwii::runtime::gxdbg::skip_blend) title += " [skipBlend]";
-      if (nwii::runtime::gxdbg::only_blend) title += " [onlyBlend]";
-      if (nwii::runtime::gxdbg::solo_count)
-        title += " [solo=" + std::to_string(nwii::runtime::gxdbg::solo_count) + "]";
-      if (nwii::runtime::gxdbg::no_cull) title += " [noCull]";
-      if (nwii::runtime::gxdbg::no_depth) title += " [noDepth]";
-      if (nwii::runtime::gxdbg::skip_tex_addr) {
-        char b[32];
-        std::snprintf(b, sizeof(b), " [skipTex=%08X]", nwii::runtime::gxdbg::skip_tex_addr);
-        title += b;
-      }
-      SDL_SetWindowTitle(window, title.c_str());
-    };
+    // The title carries the guest throughput stats only. The debug hotkeys below
+    // still toggle their gxdbg flags - those drive the renderer - but they
+    // report to the console rather than tagging the window.
+    static char s_title[96] = "NWiiRecomp";
+    auto compose_title = [&window]() { SDL_SetWindowTitle(window, s_title); };
     std::cout << "[GXDBG] hotkeys: Ctrl+5..9,0 = alpha test / alpha view / no tex "
                  "/ no blend / skip blended / only blended (F5..F10 too)"
               << std::endl;
@@ -1441,13 +1423,11 @@ int main(int argc, char **argv) {
         if (next && !prev_next) {
           solo_idx = (solo_idx + 1) % 11;
           nwii::runtime::gxdbg::solo_count = solo_steps[solo_idx];
-          compose_title();
           std::cout << "[GXDBG] solo=" << nwii::runtime::gxdbg::solo_count << std::endl;
         }
         if (prevk && !prev_prev) {
           solo_idx = 0;
           nwii::runtime::gxdbg::solo_count = 0;
-          compose_title();
           std::cout << "[GXDBG] solo=0" << std::endl;
         }
         prev_next = next;
@@ -1467,7 +1447,6 @@ int main(int argc, char **argv) {
           std::snprintf(b, sizeof(b), "[GXDBG] skipTex=%08X",
                         nwii::runtime::gxdbg::skip_tex_addr);
           std::cout << b << std::endl;
-          compose_title();
         }
         prev_tex = texk;
         static bool prev_n = false, prev_b = false;
@@ -1554,8 +1533,8 @@ int main(int argc, char **argv) {
           // 100 briefly (frames counted across a period boundary), so clamp it.
           int pct = (int)(100.0 * fps_guest / 59.94 + 0.5);
           if (pct > 100) pct = 100;
-          std::snprintf(s_title_stats, sizeof(s_title_stats),
-                        "guest %.1f/60 fps (%d%%)  %.0f MIPS",
+          std::snprintf(s_title, sizeof(s_title),
+                        "NWiiRecomp  guest %.1f/60 fps (%d%%)  %.0f MIPS",
                         fps_guest, pct, mips);
           compose_title();
           title_t0 = now;
