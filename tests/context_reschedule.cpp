@@ -3,6 +3,7 @@
 #include "runtime/hw/hw.h"
 
 #include <cstdlib>
+#include <memory>
 
 namespace nwii::runtime {
 CPUContext *g_ctx_ptr = nullptr;
@@ -152,6 +153,30 @@ int main() {
   ctx.in_callback = true;
   hw::pi_intsr = 0;
   require(hw::g_di_interrupt_delay == 0);
+
+  // A DVD completion can wake a higher-priority thread from inside the IOS
+  // callback. Keep the scheduler disabled until the interrupted context is
+  // restored, then honor the pending reschedule.
+  auto callback_storage = std::make_unique<CPUContext>();
+  CPUContext &callback_ctx = *callback_storage;
+  callback_ctx.gpr[13] = 0x80040000;
+  callback_ctx.mmu.write32(0x800000d4, thread);
+  callback_ctx.mmu.write32(0x800000e4, thread);
+  callback_ctx.mmu.write16(thread + 0x2c8, 2);
+  callback_ctx.pc = resume;
+  callback_ctx.lr = link;
+  callback_ctx.msr = 0x8000;
+  callback_ctx.queue_callback(0x80023400, 1, 2);
+  if (setjmp(callback_ctx.exception_jmp_buf) == 0) {
+    process_pending_callbacks(callback_ctx);
+    std::abort(); // Dispatch transfers to the generated-code loop.
+  }
+  require(callback_ctx.pc == 0x80023400);
+  require(callback_ctx.mmu.read32(callback_ctx.gpr[13] - 0x6178) == 1);
+  callback_ctx.pc = sentinel;
+  require(process_pending_callbacks(callback_ctx));
+  require(callback_ctx.pc == resume && callback_ctx.ext_resched_pending);
+  require(callback_ctx.mmu.read32(callback_ctx.gpr[13] - 0x6178) == 0);
 
   return 0;
 }

@@ -925,6 +925,11 @@ static void dbg_disp(const char *kind, uint32_t handler, uint32_t c,
 
 
 static thread_local uint64_t s_last_poll_inst = 0;
+// A synthetic IOS completion runs in interrupt context. Keep the guest
+// scheduler disabled until the callback returns, as the OS interrupt path
+// does; otherwise a callback that wakes a higher-priority thread can abandon
+// its own stack before the DVD driver finishes processing the completion.
+static thread_local uint32_t s_callback_sched_lock = 0;
 static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext &ctx);
 
 bool process_pending_callbacks(CPUContext &ctx) {
@@ -1039,6 +1044,12 @@ static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext 
   }
 
   if (ctx.pc == 0xFFFFFFFC && !ctx.in_callback) {
+    if (s_callback_sched_lock) {
+      const uint32_t lock = s_callback_sched_lock;
+      s_callback_sched_lock = 0;
+      ctx.mmu.write32(lock, ctx.mmu.read32(lock) - 1);
+      ctx.ext_resched_pending = true;
+    }
     if (ctx.dispatch_saved_ctx) {
       if (s_env_dbg_ctx()) {
         static int n = 0;
@@ -1726,6 +1737,13 @@ static __attribute__((noinline)) bool process_pending_callbacks_slow(CPUContext 
                 << " bk=" << ctx.backup_stack.size() << "\n";
   }
   if (current_ctx != 0) {
+
+    if (nwii::runtime::Config::get().game_id == "SOJE41" &&
+        ctx.gpr[13] >= 0x80006178u && ctx.gpr[13] < 0x81800000u) {
+      s_callback_sched_lock = ctx.gpr[13] - 0x6178;
+      ctx.mmu.write32(s_callback_sched_lock,
+                      ctx.mmu.read32(s_callback_sched_lock) + 1);
+    }
 
     hle_save_context_to_guest(ctx, current_ctx);
     ctx.dispatch_saved_ctx = current_ctx;

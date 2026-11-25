@@ -242,6 +242,20 @@ void ProcessGXFifo() {
     // but if the frame boundary is being mis-detected here, every draw can end up
     // classified as stale and nothing reaches the screen.
     static const bool keep_stale = std::getenv("NWII_KEEP_STALE") != nullptr;
+    static const bool frame_audit = std::getenv("NWII_FRAME_AUDIT") != nullptr;
+    if (frame_audit && g_stat_frames % 300 == 0) {
+        size_t draws = 0, stale = 0;
+        for (int i = 0; i <= last_frame_end; ++i) {
+            if (s_carry[i].type == nwii::runtime::gx::GXCommandType::DrawPrimitive) {
+                ++draws;
+                if (i <= prev_frame_end) ++stale;
+            }
+        }
+        std::cout << "[FRAME_AUDIT] frame=" << g_stat_frames
+                  << " commands=" << last_frame_end + 1
+                  << " draws=" << draws << " stale=" << stale
+                  << " remainder=" << s_parse_buf.size() << "\n";
+    }
     for (int i = 0; i <= last_frame_end; ++i) {
         auto &c = s_carry[i];
         if (!keep_stale && i <= prev_frame_end &&
