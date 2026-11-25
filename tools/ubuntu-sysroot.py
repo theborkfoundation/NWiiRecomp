@@ -90,6 +90,14 @@ def log(message):
     print(message, flush=True)
 
 
+# ports.ubuntu.com rejects requests without a User-Agent with HTTP 403. Python's
+# urllib sends none by default, so every download from it failed after three
+# retries with an error that looks like the file is gone. curl sends one, which
+# is why the same URL works from a shell.
+_OPENER = urllib.request.build_opener()
+_OPENER.addheaders = [("User-Agent", "ubuntu-sysroot/1.0 (+nwiirecomp)")]
+
+
 def fetch(url, dest):
     """Download url to dest (skipping it when already cached)."""
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
@@ -99,7 +107,7 @@ def fetch(url, dest):
 
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(url, timeout=60) as response:
+            with _OPENER.open(url, timeout=60) as response:
                 with open(partial, "wb") as out:
                     shutil.copyfileobj(response, out)
             os.replace(partial, dest)
@@ -115,7 +123,7 @@ def load_index(mirror, suite, component, arch):
     """Return {package: {field: value}} for one component of a suite."""
     url = "%s/dists/%s/%s/binary-%s/Packages.xz" % (mirror, suite, component, arch)
     log("index %s" % url)
-    with urllib.request.urlopen(url, timeout=120) as response:
+    with _OPENER.open(url, timeout=120) as response:
         raw = lzma.decompress(response.read()).decode("utf-8", "replace")
 
     packages = {}

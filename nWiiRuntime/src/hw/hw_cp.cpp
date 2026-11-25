@@ -88,6 +88,22 @@ void cp_process_fifo() {
 
     if (rp == wp) {
         g_cp_sr |= 0x0E; // Read idle (bit 2) + Cmd idle (bit 3) + Underflow (bit 1)
+        // The FIFO is already drained, so an armed breakpoint is satisfied now.
+        //
+        // This used to return here and check the breakpoint only further down,
+        // after actually draining something. A title that arms CP_FIFO_BP while
+        // the ring is empty and then waits for the draw-done interrupt never got
+        // it: GXFlush/GFXAdapter present waits on waitingDoneRender__3ITF, which
+        // only the breakpoint releases. Rayman Origins stalls on the black screen
+        // after the intro for exactly this reason (0 draws, ~1.4 kHz of mtdec in
+        // 0x800A25D0 while it polls).
+        if (g_cp_fifo_bp != 0) {
+            g_cp_fifo_bp = 0;
+            g_cp_sr |= 0x01; // breakpoint
+            g_cp_sr |= 0x12; // breakpoint ack / draw done
+            pi_intmr |= 0x800;
+            trigger_pi_interrupt(0x800);
+        }
         return;
     }
 
